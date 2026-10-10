@@ -1,4 +1,5 @@
-// Package server exposes storage mounts over HTTP.
+// Package server wires the remoteStorage handler, OAuth, WebFinger and the
+// account web UI together.
 package server
 
 import (
@@ -6,360 +7,318 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
-	"mime"
 	"net/http"
-	"path"
 	"strconv"
 	"strings"
 	"time"
 
+	"anime.bike/remotestorage/pkg/rs"
+	"anime.bike/remotestorage/pkg/rsserver"
+	"anime.bike/remotestorage/pkg/webfinger"
+
 	"github.com/elee1766/gopherstorage/internal/auth"
 	"github.com/elee1766/gopherstorage/internal/config"
+	"github.com/elee1766/gopherstorage/internal/meta"
+	"github.com/elee1766/gopherstorage/internal/oauth"
 	"github.com/elee1766/gopherstorage/internal/storage"
 )
 
 //go:embed web
 var webFS embed.FS
 
-type Authenticator interface {
-	Authenticate(r *http.Request) *auth.User
-	Login(w http.ResponseWriter, r *http.Request)
-	Callback(w http.ResponseWriter, r *http.Request)
-	Logout(w http.ResponseWriter, r *http.Request)
-}
+// StoragePrefix is where user storage roots live: <public_url>/storage/<user>.
+const StoragePrefix = "/storage/"
 
 type Server struct {
-	auth      Authenticator
-	mounts    map[string]*mount
-	order     []string
-	maxUpload int64
+	cfg     *config.Config
+	store   *meta.Store
+	storage *storage.Service
+	auth    *auth.Authenticator
+	oauth   *oauth.Server
+	rs      http.Handler
 }
 
-func New(cfg *config.Config, a Authenticator, backends map[string]storage.Backend) (*Server, error) {
-	s := &Server{auth: a, mounts: map[string]*mount{}, maxUpload: cfg.MaxUploadBytes}
-	for _, m := range cfg.Mounts {
-		b, ok := backends[m.Backend]
-		if !ok {
-			return nil, fmt.Errorf("mount %q: backend %q not initialized", m.Name, m.Backend)
-		}
-		s.mounts[m.Name] = &mount{cfg: m, backend: b}
-		s.order = append(s.order, m.Name)
-	}
-	return s, nil
+func New(cfg *config.Config, store *meta.Store, svc *storage.Service, a *auth.Authenticator, o *oauth.Server) *Server {
+	s := &Server{cfg: cfg, store: store, storage: svc, auth: a, oauth: o}
+	s.rs = rsserver.NewBuilder().
+		WithResourceResolver(resolver{}).
+		WithAuthenticator(rsserver.AuthenticatorFunc(s.authenticate)).
+		WithAuthorizer(rsserver.NewScopeCheckingAuthorizer()).
+		WithStorageProvider(rsserver.StorageProviderFunc(s.storageFor)).
+		WithMaxDocumentSize(cfg.Storage.MaxDocumentBytes).
+		MustBuild()
+	return s
 }
 
-// OpenBackends initializes every backend in the config.
-func OpenBackends(ctx context.Context, cfg *config.Config) (map[string]storage.Backend, error) {
-	out := map[string]storage.Backend{}
-	for name, b := range cfg.Backends {
-		var (
-			be  storage.Backend
-			err error
-		)
-		switch b.Type {
-		case "filesystem":
-			be, err = storage.NewFilesystem(b.Path)
-		case "s3":
-			var s3 *storage.S3
-			s3, err = storage.NewS3(ctx, storage.S3Options{
-				Endpoint: b.Endpoint, Region: b.Region, Bucket: b.Bucket,
-				AccessKey: b.AccessKey, SecretKey: b.SecretKey, SessionToken: b.SessionToken,
-				Insecure: b.Insecure, PathStyle: b.PathStyle,
-			})
-			if err == nil {
-				prefix, perr := storage.Clean(b.Prefix)
-				if perr != nil {
-					return nil, fmt.Errorf("backend %q: invalid prefix", name)
-				}
-				be = storage.Prefixed(s3, prefix)
-			}
-		}
-		if err != nil {
-			return nil, fmt.Errorf("backend %q: %w", name, err)
-		}
-		out[name] = be
+// resolver maps /<user>/<path> (after StoragePrefix is stripped) to a resource.
+type resolver struct{}
+
+func (resolver) ResolveResource(r *http.Request) (*rsserver.ResourceRef, error) {
+	rest := strings.TrimPrefix(r.URL.EscapedPath(), "/")
+	user, p, ok := strings.Cut(rest, "/")
+	if !ok || !auth.ValidUsername(user) {
+		return nil, rsserver.NewHTTPError(http.StatusNotFound, "Not found")
 	}
-	return out, nil
+	path, err := rsserver.UnescapePath("/" + p)
+	if err != nil {
+		return nil, err
+	}
+	return &rsserver.ResourceRef{RequestedUser: user, Path: path}, nil
+}
+
+func (s *Server) authenticate(r *http.Request, token string) (*rsserver.AuthInfo, error) {
+	if token == "" {
+		return nil, nil
+	}
+	ti, err := s.store.LookupToken(r.Context(), token)
+	if errors.Is(err, meta.ErrNotFound) {
+		return nil, rsserver.NewHTTPError(http.StatusUnauthorized, "Invalid or expired token")
+	}
+	if err != nil {
+		return nil, err
+	}
+	scopes, _ := rs.ParseScopes(ti.Scope)
+	go s.store.TouchGrant(context.WithoutCancel(r.Context()), ti.GrantID)
+	return &rsserver.AuthInfo{UserID: strconv.FormatInt(ti.UserID, 10), Username: ti.Username, Scopes: scopes}, nil
+}
+
+func (s *Server) storageFor(ctx context.Context, _ *rsserver.AuthInfo, req *rsserver.ResourceRequest) (rsserver.StorageBackend, error) {
+	u, err := s.store.UserByName(ctx, req.Resource.RequestedUser)
+	if errors.Is(err, meta.ErrNotFound) {
+		// Unknown users look like empty storage to authorized callers;
+		// public reads get 404 from the empty tree.
+		return emptyStorage{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.storage.ForUser(u), nil
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "ok\n") })
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
+
+	// remoteStorage (/storage/ is routed in routeStorage)
+	mux.Handle("/.well-known/webfinger", s.webfinger())
+	mux.HandleFunc("/oauth/authorize", s.oauth.Authorize)
+	mux.HandleFunc("/oauth/token", s.oauth.Token)
+
+	// Login and account UI
 	mux.HandleFunc("GET /auth/login", s.auth.Login)
 	mux.HandleFunc("GET /auth/callback", s.auth.Callback)
 	mux.HandleFunc("GET /auth/logout", s.auth.Logout)
 	mux.HandleFunc("POST /auth/logout", s.auth.Logout)
-
-	mux.HandleFunc("GET /api/me", s.authed(s.handleMe))
-	for _, pat := range []string{"/api/files/{mount}", "/api/files/{mount}/{path...}"} {
-		mux.HandleFunc("GET "+pat, s.authed(s.handleGet))
-		mux.HandleFunc("PUT "+pat, s.authed(s.handlePut))
-		mux.HandleFunc("POST "+pat, s.authed(s.handlePost))
-		mux.HandleFunc("DELETE "+pat, s.authed(s.handleDelete))
-	}
-	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) { jsonError(w, http.StatusNotFound, "not found") })
-
+	mux.HandleFunc("GET /api/account", s.handleAccount)
+	mux.HandleFunc("DELETE /api/grants/{id}", s.handleRevoke)
+	mux.HandleFunc("GET /api/admin/users", s.handleAdminUsers)
+	mux.HandleFunc("PUT /api/admin/users/{id}/quota", s.handleSetQuota)
 	mux.HandleFunc("GET /{$}", s.handleIndex)
-	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(mustSub(webFS, "web"))))
+	sub, _ := fs.Sub(webFS, "web")
+	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(sub)))
 
-	csrf := http.NewCrossOriginProtection()
-	return logRequests(securityHeaders(csrf.Handler(mux)))
+	return logRequests(s.protectUI(s.routeStorage(mux)))
 }
 
-type ctxKey struct{}
-
-func userFrom(r *http.Request) *auth.User { return r.Context().Value(ctxKey{}).(*auth.User) }
-
-func (s *Server) authed(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		u := s.auth.Authenticate(r)
-		if u == nil {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="gopherstorage"`)
-			jsonError(w, http.StatusUnauthorized, "authentication required")
+// routeStorage sends /storage/ requests straight to the remoteStorage handler.
+// http.ServeMux would clean paths like "a//b" or "a/./b" and redirect,
+// instead of letting the handler reject them.
+func (s *Server) routeStorage(mux http.Handler) http.Handler {
+	storage := http.StripPrefix(strings.TrimSuffix(StoragePrefix, "/"), s.rs)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, StoragePrefix) {
+			storage.ServeHTTP(w, r)
 			return
 		}
-		h(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, u)))
-	}
+		mux.ServeHTTP(w, r)
+	})
 }
 
-type mountInfo struct {
-	Name     string `json:"name"`
-	Writable bool   `json:"writable"`
-	PerUser  bool   `json:"per_user"`
-}
-
-func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	u := userFrom(r)
-	mounts := []mountInfo{}
-	for _, name := range s.order {
-		m := s.mounts[name]
-		if m.canRead(u) {
-			mounts = append(mounts, mountInfo{Name: name, Writable: m.canWrite(u), PerUser: m.cfg.PerUser()})
+// protectUI applies cross-origin protection and security headers to
+// everything except the remoteStorage API, OAuth and WebFinger, which must be
+// usable from other origins.
+func (s *Server) protectUI(next http.Handler) http.Handler {
+	cop := http.NewCrossOriginProtection()
+	cop.AddInsecureBypassPattern(StoragePrefix)
+	cop.AddInsecureBypassPattern("/oauth/token")
+	cop.AddInsecureBypassPattern("/.well-known/webfinger")
+	return cop.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if !strings.HasPrefix(r.URL.Path, StoragePrefix) {
+			w.Header().Set("Referrer-Policy", "same-origin")
 		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"user": u, "mounts": mounts})
+		next.ServeHTTP(w, r)
+	}))
 }
 
-// target resolves the mount and path for a request and checks access.
-func (s *Server) target(w http.ResponseWriter, r *http.Request, write bool) (storage.Backend, string, bool) {
-	u := userFrom(r)
-	m, ok := s.mounts[r.PathValue("mount")]
-	if !ok || !m.canRead(u) {
-		jsonError(w, http.StatusNotFound, "mount not found")
-		return nil, "", false
-	}
-	if write && !m.canWrite(u) {
-		jsonError(w, http.StatusForbidden, "mount is read only for you")
-		return nil, "", false
-	}
-	p, err := storage.Clean(r.PathValue("path"))
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, "invalid path")
-		return nil, "", false
-	}
-	b, err := m.resolve(u)
-	if err != nil {
-		jsonError(w, http.StatusForbidden, err.Error())
-		return nil, "", false
-	}
-	// Create the mount root on first use so new mounts and user homes list as empty.
-	if _, err := b.Stat(r.Context(), ""); errors.Is(err, storage.ErrNotExist) {
-		if err := b.Mkdir(r.Context(), ""); err != nil {
-			s.storageError(w, r, err)
-			return nil, "", false
+func (s *Server) webfinger() http.Handler {
+	authz := s.cfg.PublicURL + "/oauth/authorize"
+	wf := webfinger.NewServer(s.cfg.Host(), webfinger.StorageResolverFunc(func(user string) (*webfinger.UserStorageInfo, error) {
+		user = strings.ToLower(user)
+		if !auth.ValidUsername(user) {
+			return nil, nil
 		}
-	}
-	return b, p, true
+		if _, err := s.store.UserByName(context.Background(), user); errors.Is(err, meta.ErrNotFound) {
+			return nil, nil
+		} else if err != nil {
+			return nil, err
+		}
+		return &webfinger.UserStorageInfo{
+			StorageRoot:         s.cfg.PublicURL + StoragePrefix + user,
+			AuthEndpoint:        &authz,
+			TokenEndpoint:       s.cfg.PublicURL + "/oauth/token",
+			RangeRequestSupport: "GET",
+		}, nil
+	}))
+	return wf
 }
 
-func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
-	b, p, ok := s.target(w, r, false)
-	if !ok {
+func (s *Server) session(w http.ResponseWriter, r *http.Request) *auth.Session {
+	sess := s.auth.Current(r)
+	if sess == nil {
+		jsonError(w, http.StatusUnauthorized, "not signed in")
+	}
+	return sess
+}
+
+type grantView struct {
+	ID       int64     `json:"id"`
+	Client   string    `json:"client"`
+	Origin   string    `json:"origin"`
+	Scope    string    `json:"scope"`
+	Created  time.Time `json:"created"`
+	LastUsed time.Time `json:"last_used,omitzero"`
+}
+
+func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
+	sess := s.session(w, r)
+	if sess == nil {
 		return
 	}
 	ctx := r.Context()
-	e, err := b.Stat(ctx, p)
+	u, err := s.store.UserByID(ctx, sess.UserID)
 	if err != nil {
-		s.storageError(w, r, err)
+		jsonError(w, http.StatusInternalServerError, "account lookup failed")
 		return
 	}
-	if e.IsDir {
-		entries, err := b.List(ctx, p)
-		if err != nil {
-			s.storageError(w, r, err)
-			return
-		}
-		if entries == nil {
-			entries = []storage.Entry{}
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"entry": e, "entries": entries})
-		return
-	}
-	if r.URL.Query().Has("stat") {
-		writeJSON(w, http.StatusOK, map[string]any{"entry": e})
-		return
-	}
-	f, e, err := b.Open(ctx, p)
+	docs, _, err := s.store.Usage(ctx, u.ID)
 	if err != nil {
-		s.storageError(w, r, err)
+		jsonError(w, http.StatusInternalServerError, "usage lookup failed")
 		return
 	}
-	defer f.Close()
-	h := w.Header()
-	ct := e.ContentType
-	if ct == "" {
-		ct = "application/octet-stream"
-	}
-	h.Set("Content-Type", ct)
-	if e.ETag != "" {
-		h.Set("ETag", `"`+strings.Trim(e.ETag, `"`)+`"`)
-	}
-	// Uploaded content is untrusted. Never run it as active content on this origin.
-	h.Set("Content-Security-Policy", "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'")
-	disp := "inline"
-	if r.URL.Query().Has("download") {
-		disp = "attachment"
-	}
-	h.Set("Content-Disposition", mime.FormatMediaType(disp, map[string]string{"filename": e.Name}))
-	http.ServeContent(w, r, e.Name, e.ModTime, f)
-}
-
-func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
-	b, p, ok := s.target(w, r, true)
-	if !ok {
-		return
-	}
-	if p == "" {
-		jsonError(w, http.StatusBadRequest, "path is required")
-		return
-	}
-	ctx := r.Context()
-	if r.URL.Query().Get("overwrite") == "false" {
-		if _, err := b.Stat(ctx, p); err == nil {
-			jsonError(w, http.StatusConflict, "already exists")
-			return
-		}
-	}
-	size := r.ContentLength
-	body := io.Reader(r.Body)
-	if s.maxUpload > 0 {
-		if size > s.maxUpload {
-			jsonError(w, http.StatusRequestEntityTooLarge, "upload too large")
-			return
-		}
-		body = http.MaxBytesReader(w, r.Body, s.maxUpload)
-	}
-	ct := r.Header.Get("Content-Type")
-	if ct == "" || strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
-		ct = mime.TypeByExtension(path.Ext(p))
-	}
-	e, err := b.Put(ctx, p, body, size, ct)
+	grants, err := s.store.ListGrants(ctx, u.ID)
 	if err != nil {
-		var mbe *http.MaxBytesError
-		if errors.As(err, &mbe) {
-			jsonError(w, http.StatusRequestEntityTooLarge, "upload too large")
-			return
-		}
-		s.storageError(w, r, err)
+		jsonError(w, http.StatusInternalServerError, "grant lookup failed")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"entry": e})
+	gv := []grantView{}
+	for _, g := range grants {
+		v := grantView{ID: g.ID, Client: g.ClientName, Origin: g.ClientID, Scope: g.Scope, Created: g.CreatedAt}
+		if g.LastUsedAt.Unix() > 0 {
+			v.LastUsed = g.LastUsedAt
+		}
+		gv = append(gv, v)
+	}
+	quota := u.QuotaBytes
+	if quota == 0 {
+		quota = s.cfg.Storage.DefaultQuotaBytes
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"username":     u.Username,
+		"name":         sess.Name,
+		"address":      u.Username + "@" + s.cfg.Host(),
+		"storage_root": s.cfg.PublicURL + StoragePrefix + u.Username,
+		"used_bytes":   u.UsedBytes,
+		"quota_bytes":  quota,
+		"documents":    docs,
+		"admin":        sess.Admin,
+		"grants":       gv,
+	})
 }
 
-type moveRequest struct {
-	To string `json:"to"`
-}
-
-func (s *Server) handlePost(w http.ResponseWriter, r *http.Request) {
-	op := r.URL.Query().Get("op")
-	b, p, ok := s.target(w, r, true)
-	if !ok {
+func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	sess := s.session(w, r)
+	if sess == nil {
 		return
 	}
-	ctx := r.Context()
-	switch op {
-	case "mkdir":
-		if err := b.Mkdir(ctx, p); err != nil {
-			s.storageError(w, r, err)
-			return
-		}
-		e, err := b.Stat(ctx, p)
-		if err != nil {
-			s.storageError(w, r, err)
-			return
-		}
-		writeJSON(w, http.StatusCreated, map[string]any{"entry": e})
-	case "move":
-		var req moveRequest
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
-			jsonError(w, http.StatusBadRequest, "body must be JSON: {\"to\": \"path\"}")
-			return
-		}
-		dst, err := storage.Clean(req.To)
-		if err != nil || dst == "" || p == "" {
-			jsonError(w, http.StatusBadRequest, "invalid path")
-			return
-		}
-		if err := b.Move(ctx, p, dst); err != nil {
-			s.storageError(w, r, err)
-			return
-		}
-		e, err := b.Stat(ctx, dst)
-		if err != nil {
-			s.storageError(w, r, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"entry": e})
-	default:
-		jsonError(w, http.StatusBadRequest, "unknown op, want mkdir or move")
-	}
-}
-
-func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
-	b, p, ok := s.target(w, r, true)
-	if !ok {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	if p == "" {
-		jsonError(w, http.StatusBadRequest, "cannot delete mount root")
+	if err := s.store.RevokeGrant(r.Context(), sess.UserID, id); errors.Is(err, meta.ErrNotFound) {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	} else if err != nil {
+		jsonError(w, http.StatusInternalServerError, "revoke failed")
 		return
 	}
-	recursive, _ := strconv.ParseBool(r.URL.Query().Get("recursive"))
-	if err := b.Delete(r.Context(), p, recursive); err != nil {
-		s.storageError(w, r, err)
-		return
-	}
+	slog.Info("grant revoked", "user", sess.Username, "grant", id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) storageError(w http.ResponseWriter, r *http.Request, err error) {
-	switch {
-	case errors.Is(err, storage.ErrNotExist):
-		jsonError(w, http.StatusNotFound, "not found")
-	case errors.Is(err, storage.ErrExist):
-		jsonError(w, http.StatusConflict, "already exists")
-	case errors.Is(err, storage.ErrNotEmpty):
-		jsonError(w, http.StatusConflict, "directory not empty, use recursive=true")
-	case errors.Is(err, storage.ErrIsDir):
-		jsonError(w, http.StatusConflict, "is a directory")
-	case errors.Is(err, storage.ErrNotDir):
-		jsonError(w, http.StatusConflict, "a parent path is a file")
-	case errors.Is(err, storage.ErrInvalidPath):
-		jsonError(w, http.StatusBadRequest, "invalid path")
-	case errors.Is(err, context.Canceled):
-		// client went away
-	default:
-		slog.Error("storage error", "method", r.Method, "path", r.URL.Path, "err", err)
-		jsonError(w, http.StatusInternalServerError, "storage error")
+func (s *Server) admin(w http.ResponseWriter, r *http.Request) *auth.Session {
+	sess := s.session(w, r)
+	if sess != nil && !sess.Admin {
+		jsonError(w, http.StatusForbidden, "admins only")
+		return nil
 	}
+	return sess
+}
+
+func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
+	if s.admin(w, r) == nil {
+		return
+	}
+	users, err := s.store.ListUsers(r.Context())
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "list failed")
+		return
+	}
+	out := []map[string]any{}
+	for _, u := range users {
+		out = append(out, map[string]any{
+			"id": u.ID, "username": u.Username, "email": u.Email,
+			"used_bytes": u.UsedBytes, "quota_bytes": u.QuotaBytes, "last_login": u.LastLogin,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": out, "default_quota_bytes": s.cfg.Storage.DefaultQuotaBytes})
+}
+
+func (s *Server) handleSetQuota(w http.ResponseWriter, r *http.Request) {
+	sess := s.admin(w, r)
+	if sess == nil {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	var body struct {
+		QuotaBytes int64 `json:"quota_bytes"`
+	}
+	if err != nil || json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&body) != nil || body.QuotaBytes < 0 {
+		jsonError(w, http.StatusBadRequest, "body must be {\"quota_bytes\": n}")
+		return
+	}
+	if err := s.store.SetQuota(r.Context(), id, body.QuotaBytes); err != nil {
+		jsonError(w, http.StatusInternalServerError, "update failed")
+		return
+	}
+	slog.Info("quota set", "admin", sess.Username, "user", id, "bytes", body.QuotaBytes)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
+	data, _ := webFS.ReadFile("web/index.html")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Write(data)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
 }
@@ -368,34 +327,9 @@ func jsonError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	data, _ := webFS.ReadFile("web/index.html")
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'")
-	w.Write(data)
-}
-
-func mustSub(f fs.FS, dir string) fs.FS {
-	sub, err := fs.Sub(f, dir)
-	if err != nil {
-		panic(err)
-	}
-	return sub
-}
-
-func securityHeaders(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Referrer-Policy", "same-origin")
-		w.Header().Set("X-Frame-Options", "DENY")
-		h.ServeHTTP(w, r)
-	})
-}
-
 type statusWriter struct {
 	http.ResponseWriter
 	status int
-	bytes  int64
 }
 
 func (s *statusWriter) WriteHeader(code int) {
@@ -409,9 +343,7 @@ func (s *statusWriter) Write(b []byte) (int, error) {
 	if s.status == 0 {
 		s.status = http.StatusOK
 	}
-	n, err := s.ResponseWriter.Write(b)
-	s.bytes += int64(n)
-	return n, err
+	return s.ResponseWriter.Write(b)
 }
 
 func (s *statusWriter) Unwrap() http.ResponseWriter { return s.ResponseWriter }
@@ -424,6 +356,6 @@ func logRequests(h http.Handler) http.Handler {
 		if r.URL.Path == "/healthz" {
 			return
 		}
-		slog.Info("http", "method", r.Method, "path", r.URL.Path, "status", sw.status, "bytes", sw.bytes, "dur", time.Since(start).Round(time.Millisecond))
+		slog.Info("http", "method", r.Method, "path", r.URL.Path, "status", sw.status, "dur", time.Since(start).Round(time.Millisecond))
 	})
 }

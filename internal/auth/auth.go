@@ -1,24 +1,25 @@
-// Package auth handles OpenID Connect login and request authentication.
+// Package auth handles OpenID Connect login of users to the web UI.
+// remoteStorage apps never see OIDC tokens; they get tokens from the
+// server's own OAuth endpoints (package oauth) after the user logs in here.
 package auth
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
 	"github.com/elee1766/gopherstorage/internal/config"
+	"github.com/elee1766/gopherstorage/internal/meta"
 )
 
 const (
@@ -27,13 +28,12 @@ const (
 	flowTTL       = 10 * time.Minute
 )
 
-type User struct {
-	Subject  string   `json:"sub"`
-	Username string   `json:"username"`
-	Email    string   `json:"email,omitempty"`
-	Name     string   `json:"name,omitempty"`
-	Groups   []string `json:"groups"`
-	Admin    bool     `json:"admin"`
+// Session is the logged-in user, stored in an encrypted cookie.
+type Session struct {
+	UserID   int64  `json:"uid"`
+	Username string `json:"u"`
+	Name     string `json:"n,omitempty"`
+	Admin    bool   `json:"a,omitempty"`
 }
 
 type Authenticator struct {
@@ -47,25 +47,18 @@ type Authenticator struct {
 	session   *sealer
 	flow      *sealer
 	endSess   string
-
-	cacheMu sync.Mutex
-	cache   map[[32]byte]cachedUser
+	store     *meta.Store
 }
 
-type cachedUser struct {
-	user *User
-	exp  time.Time
-}
-
-func New(ctx context.Context, cfg *config.Config) (*Authenticator, error) {
+func New(ctx context.Context, cfg *config.Config, store *meta.Store) (*Authenticator, error) {
 	provider, err := oidc.NewProvider(ctx, cfg.OIDC.Issuer)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery: %w", err)
 	}
-	var meta struct {
+	var md struct {
 		EndSession string `json:"end_session_endpoint"`
 	}
-	_ = provider.Claims(&meta)
+	_ = provider.Claims(&md)
 	sess, err := newSealer(cfg.Session.Secret, "session")
 	if err != nil {
 		return nil, err
@@ -90,8 +83,8 @@ func New(ctx context.Context, cfg *config.Config) (*Authenticator, error) {
 		},
 		session: sess,
 		flow:    flow,
-		endSess: meta.EndSession,
-		cache:   map[[32]byte]cachedUser{},
+		endSess: md.EndSession,
+		store:   store,
 	}, nil
 }
 
@@ -114,8 +107,8 @@ func (a *Authenticator) setCookie(w http.ResponseWriter, name, value string, max
 	})
 }
 
-// safeReturn only allows local absolute paths as post-login redirect targets.
-func safeReturn(r string) string {
+// SafeReturn only allows local absolute paths as post-login redirect targets.
+func SafeReturn(r string) string {
 	if !strings.HasPrefix(r, "/") || strings.HasPrefix(r, "//") || strings.HasPrefix(r, "/\\") {
 		return "/"
 	}
@@ -127,7 +120,7 @@ func (a *Authenticator) Login(w http.ResponseWriter, r *http.Request) {
 		State:    oauth2.GenerateVerifier(),
 		Nonce:    oauth2.GenerateVerifier(),
 		Verifier: oauth2.GenerateVerifier(),
-		Return:   safeReturn(r.URL.Query().Get("return")),
+		Return:   SafeReturn(r.URL.Query().Get("return")),
 	}
 	v, err := a.flow.seal(fs, flowTTL)
 	if err != nil {
@@ -189,18 +182,19 @@ func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	u, err := a.userFromClaims(claims)
+	sess, err := a.login(ctx, claims)
 	if err != nil {
+		slog.Warn("login rejected", "err", err)
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	v, err := a.session.seal(u, a.maxAge)
+	v, err := a.session.seal(sess, a.maxAge)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	a.setCookie(w, sessionCookie, v, a.maxAge)
-	slog.Info("login", "user", u.Username, "sub", u.Subject)
+	slog.Info("login", "user", sess.Username)
 	http.Redirect(w, r, fs.Return, http.StatusFound)
 }
 
@@ -243,110 +237,50 @@ func claimStrings(claims map[string]any, key string) []string {
 	return nil
 }
 
-func (a *Authenticator) userFromClaims(claims map[string]any) (*User, error) {
-	u := &User{
-		Subject:  claimString(claims, "sub"),
-		Username: claimString(claims, a.cfg.UsernameClaim),
-		Email:    claimString(claims, "email"),
-		Name:     claimString(claims, "name"),
-		Groups:   claimStrings(claims, a.cfg.GroupsClaim),
-	}
-	if u.Subject == "" {
-		return nil, errors.New("token has no sub claim")
-	}
-	if u.Username == "" {
-		return nil, fmt.Errorf("token has no %q claim", a.cfg.UsernameClaim)
-	}
-	if u.Groups == nil {
-		u.Groups = []string{}
-	}
-	if len(a.cfg.AllowedGroups) > 0 && !slices.ContainsFunc(u.Groups, func(g string) bool { return slices.Contains(a.cfg.AllowedGroups, g) }) {
-		return nil, errors.New("user is not in an allowed group")
-	}
-	u.Admin = slices.ContainsFunc(u.Groups, func(g string) bool { return slices.Contains(a.cfg.AdminGroups, g) })
-	return u, nil
+// usernameRe limits usernames to what is safe in URLs and acct: addresses.
+var usernameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+
+// ValidUsername reports whether name can be a storage username.
+func ValidUsername(name string) bool {
+	return usernameRe.MatchString(name) && name != "." && name != ".."
 }
 
-// Authenticate returns the user for a request from a session cookie or a
-// bearer token. It returns nil if the request is not authenticated.
-func (a *Authenticator) Authenticate(r *http.Request) *User {
-	if h := r.Header.Get("Authorization"); h != "" {
-		tok, ok := strings.CutPrefix(h, "Bearer ")
-		if !ok {
-			return nil
-		}
-		return a.bearer(r.Context(), strings.TrimSpace(tok))
+func (a *Authenticator) login(ctx context.Context, claims map[string]any) (*Session, error) {
+	sub := claimString(claims, "sub")
+	if sub == "" {
+		return nil, errors.New("token has no sub claim")
 	}
+	username := strings.ToLower(claimString(claims, a.cfg.UsernameClaim))
+	if a.cfg.UsernameClaim == "email" {
+		username, _, _ = strings.Cut(username, "@")
+	}
+	if !ValidUsername(username) {
+		return nil, fmt.Errorf("claim %q = %q is not a usable username (lowercase letters, digits, '.', '_', '-')", a.cfg.UsernameClaim, username)
+	}
+	groups := claimStrings(claims, a.cfg.GroupsClaim)
+	if len(a.cfg.AllowedGroups) > 0 && !slices.ContainsFunc(groups, func(g string) bool { return slices.Contains(a.cfg.AllowedGroups, g) }) {
+		return nil, errors.New("you are not in a group that may use this server")
+	}
+	u, err := a.store.UpsertUser(ctx, sub, username, claimString(claims, "email"))
+	if err != nil {
+		return nil, err
+	}
+	name := claimString(claims, "name")
+	if name == "" {
+		name = u.Username
+	}
+	return &Session{UserID: u.ID, Username: u.Username, Name: name, Admin: a.cfg.IsAdmin(groups)}, nil
+}
+
+// Current returns the session of the request, or nil.
+func (a *Authenticator) Current(r *http.Request) *Session {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
 		return nil
 	}
-	var u User
-	if a.session.open(c.Value, &u) != nil {
+	var s Session
+	if a.session.open(c.Value, &s) != nil {
 		return nil
 	}
-	return &u
-}
-
-// bearer accepts an ID token issued to this client, or any access token
-// that the provider's userinfo endpoint accepts.
-func (a *Authenticator) bearer(ctx context.Context, tok string) *User {
-	key := sha256.Sum256([]byte(tok))
-	now := time.Now()
-	a.cacheMu.Lock()
-	if c, ok := a.cache[key]; ok && now.Before(c.exp) {
-		a.cacheMu.Unlock()
-		return c.user
-	}
-	a.cacheMu.Unlock()
-
-	// The token must be a JWT signed by the issuer with this client in its audience.
-	idt, err := a.verifier.Verify(ctx, tok)
-	if err != nil {
-		return nil
-	}
-	claims := map[string]any{}
-	if idt.Claims(&claims) != nil {
-		return nil
-	}
-	exp := now.Add(5 * time.Minute)
-	if idt.Expiry.Before(exp) {
-		exp = idt.Expiry
-	}
-	// Access tokens usually lack profile claims. Fill them in from userinfo.
-	if _, ok := claims[a.cfg.UsernameClaim]; !ok {
-		ui, err := a.provider.UserInfo(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: tok, TokenType: "Bearer"}))
-		if err != nil || ui.Subject != idt.Subject {
-			return nil
-		}
-		extra := map[string]any{}
-		if ui.Claims(&extra) == nil {
-			for k, v := range extra {
-				if _, ok := claims[k]; !ok {
-					claims[k] = v
-				}
-			}
-		}
-	}
-	u, err := a.userFromClaims(claims)
-	if err != nil {
-		return nil
-	}
-	a.cacheMu.Lock()
-	if len(a.cache) > 10000 {
-		for k, c := range a.cache {
-			if now.After(c.exp) {
-				delete(a.cache, k)
-			}
-		}
-	}
-	a.cache[key] = cachedUser{user: u, exp: exp}
-	a.cacheMu.Unlock()
-	return u
-}
-
-// ProviderInfo is exposed so CLI clients can discover the issuer.
-func (a *Authenticator) ProviderInfo(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"issuer": a.cfg.Issuer, "client_id": a.cfg.ClientID})
+	return &s
 }

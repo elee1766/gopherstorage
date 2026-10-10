@@ -2,10 +2,11 @@
 # an unset variable is an error.
 
 listen: ":8080"
-# The URL users open. The OIDC redirect URI is <public_url>/auth/callback.
-public_url: https://files.example.com
-# Per-upload limit in bytes. 0 or unset means unlimited.
-max_upload_bytes: 10737418240
+# The URL users open. User addresses are <username>@<host of public_url>,
+# so this host must also serve /.well-known/webfinger.
+public_url: https://storage.example.com
+# Holds meta.db (SQLite) and, with the filesystem backend, the blobs.
+data_dir: /var/lib/gopherstorage
 
 oidc:
   # Pocket ID: the issuer is the APP_URL of your Pocket ID instance.
@@ -14,58 +15,38 @@ oidc:
   client_secret: ${GS_OIDC_CLIENT_SECRET}
   # Defaults shown. Pocket ID sends groups when the "groups" scope is requested.
   scopes: [openid, profile, email, groups]
+  # Becomes the storage username: lowercase letters, digits, ".", "_", "-".
   username_claim: preferred_username
   groups_claim: groups
-  # Members of these groups can read and write every mount.
-  admin_groups: [storage-admins]
   # If set, only members of these groups can sign in.
   # allowed_groups: [storage-users]
+  # Members can list users and set quotas.
+  admin_groups: [storage-admins]
 
 session:
-  # Encrypts session cookies. Generate with: openssl rand -hex 32
+  # Encrypts session cookies and signs consent forms. openssl rand -hex 32
   secret: ${GS_SESSION_SECRET}
   max_age: 12h
 
-backends:
-  local:
-    type: filesystem
-    path: /data
+storage:
+  # Where document contents go: filesystem or s3. Metadata is always in SQLite.
+  backend: filesystem
+  # path: /var/lib/gopherstorage/blobs   # default: <data_dir>/blobs
+  max_document_bytes: 1073741824    # 1 GiB per document, 0 = unlimited
+  default_quota_bytes: 10737418240  # 10 GiB per user, 0 = unlimited
 
-  s3:
-    type: s3
-    # Any S3 compatible endpoint: Cloudflare R2, Backblaze B2, Garage,
-    # SeaweedFS, RustFS, VersityGW, MinIO, ... Leave empty for AWS S3.
-    endpoint: https://s3.us-east-1.amazonaws.com
-    region: us-east-1
-    bucket: my-bucket
-    # Optional key prefix inside the bucket.
-    prefix: gopherstorage
-    # If omitted, credentials come from the standard AWS chain
-    # (AWS_* env vars, shared config/credentials files, SSO, IAM roles).
-    access_key: ${GS_S3_ACCESS_KEY}
-    secret_key: ${GS_S3_SECRET_KEY}
-    # Set for most self-hosted servers.
-    path_style: false
-    # Use plain http (or write http:// in the endpoint).
-    insecure: false
+  # s3:
+  #   # Leave empty for AWS S3. Otherwise R2, B2, Garage, SeaweedFS, RustFS, MinIO, ...
+  #   endpoint: https://s3.example.com
+  #   region: us-east-1
+  #   bucket: gopherstorage
+  #   prefix: blobs
+  #   # Omit to use the standard AWS credential chain (env, files, IAM).
+  #   access_key: ${GS_S3_ACCESS_KEY}
+  #   secret_key: ${GS_S3_SECRET_KEY}
+  #   path_style: true      # most self-hosted servers need this
 
-# Mounts are what users see. Access rules:
-#   "*"              any signed-in user
-#   "user:<name>"    username (username_claim)
-#   "sub:<id>"       OIDC subject
-#   "email:<addr>"   email address
-#   "group:<name>"   group membership
-# Write access implies read access. Admin groups can access everything.
-mounts:
-  - name: shared
-    backend: local
-    path: shared
-    read: ["*"]
-    write: ["group:storage-admins", "group:editors"]
-
-  # {username}, {sub} or {email} make a per-user mount. Each user only sees
-  # their own directory.
-  - name: home
-    backend: s3
-    path: "users/{username}"
-    write: ["*"]
+tokens:
+  # Lifetime of tokens issued to apps. 0 = until revoked on the account page.
+  # remoteStorage apps have no refresh flow, so short TTLs force re-connecting.
+  ttl: 0s

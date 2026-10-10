@@ -8,8 +8,6 @@ services:
       GS_OIDC_CLIENT_ID: ${GS_OIDC_CLIENT_ID}
       GS_OIDC_CLIENT_SECRET: ${GS_OIDC_CLIENT_SECRET}
       GS_SESSION_SECRET: ${GS_SESSION_SECRET}
-      GS_S3_ACCESS_KEY: ${GS_S3_ACCESS_KEY:-}
-      GS_S3_SECRET_KEY: ${GS_S3_SECRET_KEY:-}
     volumes:
       - ./config.yaml:/config/config.yaml:ro
-      - ./data:/data
+      - ./data:/var/lib/gopherstorage

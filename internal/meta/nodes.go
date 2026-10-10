@@ -1,0 +1,362 @@
+package meta
+
+import (
+	"context"
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"errors"
+	"time"
+
+	"anime.bike/remotestorage/pkg/rs"
+	"anime.bike/remotestorage/pkg/rsserver"
+)
+
+// Node is a document or a non-empty folder.
+type Node struct {
+	Path        string
+	IsFolder    bool
+	ETag        string
+	ContentType string
+	Size        int64
+	BlobKey     string
+	Modified    time.Time
+}
+
+// Metadata converts a node to the remoteStorage metadata type.
+func (n *Node) Metadata() rs.Metadata {
+	return rs.Metadata{
+		Path: n.Path, Name: rs.BaseName(n.Path), IsFolder: n.IsFolder,
+		ETag: n.ETag, ContentType: n.ContentType, Size: n.Size, LastModified: n.Modified,
+	}
+}
+
+const nodeCols = `path, is_folder, etag, content_type, size, blob_key, modified_at`
+
+type scanner interface{ Scan(...any) error }
+
+func scanNode(row scanner) (*Node, error) {
+	var n Node
+	var folder int
+	var mod int64
+	if err := row.Scan(&n.Path, &folder, &n.ETag, &n.ContentType, &n.Size, &n.BlobKey, &mod); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	n.IsFolder = folder == 1
+	n.Modified = time.Unix(mod, 0).UTC()
+	return &n, nil
+}
+
+type querier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func getNode(ctx context.Context, q querier, userID int64, path string) (*Node, error) {
+	return scanNode(q.QueryRowContext(ctx, `SELECT `+nodeCols+` FROM nodes WHERE user_id = ? AND path = ?`, userID, path))
+}
+
+// GetNode returns a document or folder. Missing items return ErrNotFound.
+func (s *Store) GetNode(ctx context.Context, userID int64, path string) (*Node, error) {
+	return getNode(ctx, s.db, userID, path)
+}
+
+// ListFolder returns the folder node and its direct children, sorted by path.
+// A folder that does not exist returns (nil, nil, nil).
+func (s *Store) ListFolder(ctx context.Context, userID int64, folder string) (*Node, []*Node, error) {
+	// Read the folder and its children from one snapshot.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback()
+	f, err := getNode(ctx, tx, userID, folder)
+	if errors.Is(err, ErrNotFound) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT `+nodeCols+` FROM nodes WHERE user_id = ? AND parent = ? ORDER BY path`, userID, folder)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var children []*Node
+	for rows.Next() {
+		n, err := scanNode(rows)
+		if err != nil {
+			return nil, nil, err
+		}
+		children = append(children, n)
+	}
+	return f, children, rows.Err()
+}
+
+func newETag() string {
+	var b [16]byte
+	rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+// NewBlobKey returns a fresh random blob key.
+func NewBlobKey() string {
+	var b [16]byte
+	rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+func parentOf(p string) any {
+	if pp := rs.ParentPath(p); pp != "" {
+		return pp
+	}
+	return nil
+}
+
+// touchAncestors gives every ancestor folder of path a new ETag, creating
+// folders that do not exist yet.
+func touchAncestors(ctx context.Context, tx *sql.Tx, userID int64, path string, t int64) error {
+	for dir := rs.ParentPath(path); dir != ""; dir = rs.ParentPath(dir) {
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO nodes (user_id, path, parent, is_folder, etag, modified_at) VALUES (?, ?, ?, 1, ?, ?)
+			ON CONFLICT (user_id, path) DO UPDATE SET etag = excluded.etag, modified_at = excluded.modified_at`,
+			userID, dir, parentOf(dir), newETag(), t)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PutDocument is the input of PutDocument.
+type PutDocument struct {
+	UserID      int64
+	Path        string
+	ContentType string
+	Size        int64
+	BlobKey     string
+	// ETag of the new version. Content hashes make retries idempotent.
+	ETag  string
+	Cond  rsserver.Condition
+	Quota int64 // effective quota in bytes, 0 = unlimited
+}
+
+// PutResult describes a successful PutDocument.
+type PutResult struct {
+	ETag    string
+	Created bool
+	// OldBlobKey is the blob that the document pointed to before, now orphaned.
+	OldBlobKey string
+}
+
+// PutDocument creates or replaces a document, checking conditions, name
+// conflicts and quota, and updates all ancestor folder ETags atomically.
+// The new blob must already be stored and registered with AddPendingBlob.
+func (s *Store) PutDocument(ctx context.Context, in PutDocument) (*PutResult, error) {
+	var res PutResult
+	err := s.write(ctx, func(tx *sql.Tx) error {
+		old, err := getNode(ctx, tx, in.UserID, in.Path)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		exists := old != nil && !old.IsFolder
+		var cur string
+		if exists {
+			cur = old.ETag
+		}
+		if err := in.Cond.Check(exists, cur); err != nil {
+			return err
+		}
+		// A folder with this name, or a document on the ancestor path, conflicts.
+		if _, err := getNode(ctx, tx, in.UserID, in.Path+"/"); err == nil {
+			return rs.ErrConflict
+		} else if !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		for dir := rs.ParentPath(in.Path); dir != "/" && dir != ""; dir = rs.ParentPath(dir) {
+			n, err := getNode(ctx, tx, in.UserID, dir[:len(dir)-1])
+			if err == nil && !n.IsFolder {
+				return rs.ErrConflict
+			}
+			if err != nil && !errors.Is(err, ErrNotFound) {
+				return err
+			}
+		}
+		var oldSize int64
+		if exists {
+			oldSize = old.Size
+			res.OldBlobKey = old.BlobKey
+		}
+		delta := in.Size - oldSize
+		if in.Quota > 0 && delta > 0 {
+			var used int64
+			if err := tx.QueryRowContext(ctx, `SELECT used_bytes FROM users WHERE id = ?`, in.UserID).Scan(&used); err != nil {
+				return err
+			}
+			if used+delta > in.Quota {
+				return rs.ErrQuotaExceeded
+			}
+		}
+		t := now()
+		etag := in.ETag
+		if etag == "" || etag == cur {
+			// Same content as before still gets a new version, so the
+			// response ETag always differs from the replaced one.
+			etag = newETag()
+		}
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO nodes (user_id, path, parent, is_folder, etag, content_type, size, blob_key, modified_at)
+			VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)
+			ON CONFLICT (user_id, path) DO UPDATE SET etag = excluded.etag, content_type = excluded.content_type,
+				size = excluded.size, blob_key = excluded.blob_key, modified_at = excluded.modified_at`,
+			in.UserID, in.Path, parentOf(in.Path), etag, in.ContentType, in.Size, in.BlobKey, t)
+		if err != nil {
+			return err
+		}
+		if err := touchAncestors(ctx, tx, in.UserID, in.Path, t); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE users SET used_bytes = used_bytes + ? WHERE id = ?`, delta, in.UserID); err != nil {
+			return err
+		}
+		// The new blob is referenced now; the old one becomes an orphan.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM pending_blobs WHERE blob_key = ?`, in.BlobKey); err != nil {
+			return err
+		}
+		if res.OldBlobKey != "" && res.OldBlobKey != in.BlobKey {
+			if err := addPending(ctx, tx, res.OldBlobKey, "orphan"); err != nil {
+				return err
+			}
+		}
+		res.ETag, res.Created = etag, !exists
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// DeleteResult describes a successful DeleteDocument.
+type DeleteResult struct {
+	ETag    string
+	BlobKey string
+}
+
+// DeleteDocument removes a document, removes folders left empty and updates
+// the ETags of the remaining ancestors.
+func (s *Store) DeleteDocument(ctx context.Context, userID int64, path string, cond rsserver.Condition) (*DeleteResult, error) {
+	var res DeleteResult
+	err := s.write(ctx, func(tx *sql.Tx) error {
+		old, err := getNode(ctx, tx, userID, path)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		exists := old != nil && !old.IsFolder
+		var cur string
+		if exists {
+			cur = old.ETag
+		}
+		if err := cond.Check(exists, cur); err != nil {
+			return err
+		}
+		if !exists {
+			return rs.ErrNotFound
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE user_id = ? AND path = ?`, userID, path); err != nil {
+			return err
+		}
+		t := now()
+		for dir := rs.ParentPath(path); dir != ""; dir = rs.ParentPath(dir) {
+			var n int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1 FROM nodes WHERE user_id = ? AND parent = ? LIMIT 1)`, userID, dir).Scan(&n); err != nil {
+				return err
+			}
+			if n == 0 {
+				if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE user_id = ? AND path = ?`, userID, dir); err != nil {
+					return err
+				}
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE nodes SET etag = ?, modified_at = ? WHERE user_id = ? AND path = ?`, newETag(), t, userID, dir); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE users SET used_bytes = used_bytes - ? WHERE id = ?`, old.Size, userID); err != nil {
+			return err
+		}
+		if old.BlobKey != "" {
+			if err := addPending(ctx, tx, old.BlobKey, "orphan"); err != nil {
+				return err
+			}
+		}
+		res.ETag, res.BlobKey = old.ETag, old.BlobKey
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func addPending(ctx context.Context, tx *sql.Tx, key, reason string) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO pending_blobs (blob_key, reason, created_at) VALUES (?, ?, ?)
+		ON CONFLICT (blob_key) DO UPDATE SET reason = excluded.reason`, key, reason, now())
+	return err
+}
+
+// AddPendingBlob records a blob before it is uploaded, so it is collected if
+// the upload or the metadata write never completes.
+func (s *Store) AddPendingBlob(ctx context.Context, key string) error {
+	return s.write(ctx, func(tx *sql.Tx) error { return addPending(ctx, tx, key, "upload") })
+}
+
+// PendingBlob is a blob that may need deleting.
+type PendingBlob struct {
+	Key       string
+	Reason    string
+	CreatedAt time.Time
+}
+
+// CollectableBlobs returns orphans, and uploads older than uploadGrace
+// (which belong to requests that died), that no node references.
+func (s *Store) CollectableBlobs(ctx context.Context, uploadGrace time.Duration, limit int) ([]PendingBlob, error) {
+	cutoff := time.Now().Add(-uploadGrace).Unix()
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT p.blob_key, p.reason, p.created_at FROM pending_blobs p
+		WHERE (p.reason = 'orphan' OR p.created_at < ?)
+		  AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.blob_key = p.blob_key)
+		ORDER BY p.created_at LIMIT ?`, cutoff, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PendingBlob
+	for rows.Next() {
+		var b PendingBlob
+		var t int64
+		if err := rows.Scan(&b.Key, &b.Reason, &t); err != nil {
+			return nil, err
+		}
+		b.CreatedAt = time.Unix(t, 0)
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// ForgetBlob removes a pending entry once its blob is gone from the blob store.
+func (s *Store) ForgetBlob(ctx context.Context, key string) error {
+	return s.write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `DELETE FROM pending_blobs WHERE blob_key = ? AND NOT EXISTS (SELECT 1 FROM nodes WHERE blob_key = ?)`, key, key)
+		return err
+	})
+}
+
+// Usage reports the number of documents and bytes of a user.
+func (s *Store) Usage(ctx context.Context, userID int64) (docs, bytes int64, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(size), 0) FROM nodes WHERE user_id = ? AND is_folder = 0`, userID).Scan(&docs, &bytes)
+	return docs, bytes, err
+}

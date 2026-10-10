@@ -1,105 +1,91 @@
 # gopherstorage
 
-A self-hosted file storage server. Files live on a local filesystem or in any
-S3 compatible bucket. Users sign in through an OpenID Connect provider such as
-[Pocket ID](https://pocket-id.org).
+A [remoteStorage](https://remotestorage.io) server
+([draft-dejong-remotestorage-27](https://datatracker.ietf.org/doc/draft-dejong-remotestorage/)).
+remoteStorage apps (built with [remoteStorage.js](https://remotestoragejs.readthedocs.io)
+or any other client) keep their data in your server instead of their own.
 
-- Filesystem and S3 backends behind one interface, mixed freely.
-- Mounts with read and write rules by user, email, subject or OIDC group.
-- Per-user mounts (`users/{username}`) give each user a private directory.
-- Web UI for browsing, upload (including drag and drop), folders, rename and delete.
-- JSON/HTTP API usable from scripts with a bearer token.
-- Single static binary, config in one YAML file, no database.
+- Users sign in with OpenID Connect, for example [Pocket ID](https://pocket-id.org).
+- Apps connect with the user's address (`alice@storage.example.com`), are shown a
+  consent page, and get a scoped token. Implicit grant and PKCE code flow are supported.
+- Metadata (the document tree, ETags, tokens, quotas) lives in SQLite.
+  Document contents go to a local directory or any S3 compatible bucket.
+- The account page shows the storage address, usage, and connected apps,
+  which can be disconnected. Admins can set per-user quotas.
+
+The protocol layer is [anime.bike/remotestorage](https://github.com/elee1766/remotestorage).
 
 ## Quick start
 
 ```sh
-cp config.example.yaml config.yaml   # then edit it
+cp config.example.yaml config.yaml   # edit it
 export GS_OIDC_CLIENT_ID=... GS_OIDC_CLIENT_SECRET=... GS_SESSION_SECRET=$(openssl rand -hex 32)
 go run ./cmd/gopherstorage -config config.yaml
 ```
 
-`gopherstorage -check -config config.yaml` validates a config without starting.
+Open the server, sign in, copy your address, and enter it in a remoteStorage
+app (for example from <https://remotestorage.io/apps/>).
 
-With Docker: `docker compose up -d` (see `docker-compose.yml`).
+`gopherstorage -check -config config.yaml` validates a config without starting.
 
 ## Pocket ID setup
 
-1. In Pocket ID, go to **OIDC Clients → Add OIDC Client**.
-2. Name it `gopherstorage` and set the callback URL to
-   `https://files.example.com/auth/callback` (your `public_url` plus `/auth/callback`).
-   Optionally add `https://files.example.com/` as a logout callback URL.
-3. Keep it a confidential (non-public) client. PKCE can be on; gopherstorage always sends it.
-4. Copy the client ID and secret into `GS_OIDC_CLIENT_ID` and `GS_OIDC_CLIENT_SECRET`.
-5. Set `oidc.issuer` to your Pocket ID URL (its `APP_URL`).
-6. Create user groups in Pocket ID (for example `storage-admins`) and reference
-   them in `admin_groups`, `allowed_groups` or `group:` mount rules.
+1. In Pocket ID, **OIDC Clients → Add OIDC Client**, name it `gopherstorage`.
+2. Callback URL: `https://storage.example.com/auth/callback` (your `public_url` + `/auth/callback`).
+   Logout callback URL (optional): `https://storage.example.com/`.
+3. Keep it confidential (not public). PKCE can be on.
+4. Put the client ID and secret into `GS_OIDC_CLIENT_ID` and `GS_OIDC_CLIENT_SECRET`,
+   and set `oidc.issuer` to the Pocket ID URL.
+5. Optional: create groups such as `storage-users` and `storage-admins` and use them
+   in `allowed_groups` and `admin_groups`.
 
-You can also restrict the client to specific groups in Pocket ID with
-"Allowed user groups". `oidc.allowed_groups` does the same check on the
-gopherstorage side.
+The username comes from `preferred_username`, lowercased. It must be 1-64 characters of
+`a-z 0-9 . _ -`. Accounts are keyed by the OIDC subject, so renaming a user in Pocket ID
+renames their storage address.
 
-Other providers (Authelia, Authentik, Keycloak, Zitadel, ...) work the same way.
-Adjust `username_claim` and `groups_claim` if they use different claim names.
+## Endpoints
 
-## Configuration
-
-See [`config.example.yaml`](config.example.yaml) for every option.
-
-### Backends
-
-| type | notes |
+| path | purpose |
 | --- | --- |
-| `filesystem` | All access goes through `os.Root`, so symlinks cannot escape `path`. Writes go to a temp file and are renamed into place. |
-| `s3` | Uses `aws-sdk-go-v2`. Leave `endpoint` empty for AWS S3, set it for other providers. Directories are key prefixes. Empty folders are stored as zero byte `dir/` marker objects. Moving a directory is copy then delete, so it is not atomic. Set `path_style: true` for most self-hosted servers. |
+| `/.well-known/webfinger` | discovery for `acct:user@host` |
+| `/storage/<user>/...` | the remoteStorage API |
+| `/oauth/authorize` | app authorization (implicit and PKCE) with a consent page |
+| `/oauth/token` | PKCE token endpoint |
+| `/` | account page |
 
-The S3 backend is tested against SeaweedFS, RustFS and VersityGW.
+WebFinger must be served on the host of the user address. If `public_url` is not the
+apex of your domain, proxy `https://example.com/.well-known/webfinger` to gopherstorage
+and keep `public_url` matching that host, or use a dedicated host such as
+`storage.example.com` for both.
 
-### Access rules
+## Storage
 
-Each mount has `read` and `write` rule lists. Rules are `*`, `user:<name>`,
-`email:<addr>`, `sub:<id>` or `group:<name>`. Write implies read. Members of
-`oidc.admin_groups` can access every mount. Mounts a user cannot read are
-hidden from them.
+Each document is a row in `meta.db` plus an immutable blob named by a random key.
+Writes upload the blob first, then commit the metadata (conditions, ancestor
+folder ETags, quota) in one SQLite transaction, then delete the replaced blob.
+Blobs from failed or interrupted writes are recorded before upload and removed
+by an hourly collector, so a crash never leaves the tree pointing at missing data.
 
-## API
-
-Authenticate with the session cookie (web UI) or `Authorization: Bearer <token>`.
-Bearer tokens must be JWTs signed by the issuer with the client ID in their
-audience. Pocket ID ID tokens and access tokens issued to this client both work.
-
-| request | effect |
-| --- | --- |
-| `GET /api/me` | Current user and visible mounts. |
-| `GET /api/files/{mount}/{path}` | Directory: JSON listing. File: contents (supports `Range`). `?download` sets attachment disposition, `?stat` returns metadata. |
-| `PUT /api/files/{mount}/{path}` | Upload the request body. Parent folders are created. `?overwrite=false` refuses to replace. |
-| `POST /api/files/{mount}/{path}?op=mkdir` | Create a folder. |
-| `POST /api/files/{mount}/{path}?op=move` | Body `{"to": "new/path"}`. Moves within the mount. |
-| `DELETE /api/files/{mount}/{path}` | Delete a file or empty folder. `?recursive=true` deletes a folder tree. |
-
-```sh
-TOKEN=...   # an ID or access token from your provider for this client
-curl -H "Authorization: Bearer $TOKEN" -T report.pdf https://files.example.com/api/files/home/reports/report.pdf
-curl -H "Authorization: Bearer $TOKEN" https://files.example.com/api/files/home/reports
-```
-
-Errors are JSON: `{"error": "..."}` with status 400, 401, 403, 404, 409 or 413.
+Back up `meta.db` (SQLite online backup, `sqlite3 meta.db .backup`, or Litestream)
+together with the blob directory or bucket.
 
 ## Security notes
 
-- Session cookies are AES-GCM encrypted with a key derived from `session.secret`,
-  `HttpOnly`, `SameSite=Lax`, and `Secure` when `public_url` is https.
-- Cross-origin state changing requests are rejected (`http.CrossOriginProtection`).
-- Files are served with `Content-Security-Policy: sandbox`, so an uploaded HTML
-  file cannot run scripts with access to the app.
-- Changing `session.secret` signs everyone out.
-- Run behind a TLS terminating reverse proxy in production.
+- Tokens are random 256-bit values. Only their SHA-256 hash is stored.
+- Apps are identified by the origin of their `redirect_uri` (no client registration,
+  as in the spec). Plain `http` redirect URIs are only accepted for localhost.
+- The consent form is bound to the user and request with an HMAC, and cross-origin
+  POSTs to the UI are rejected.
+- Run behind TLS. Session cookies are `Secure` when `public_url` is https.
 
 ## Development
 
 ```sh
 go test ./...
-# S3 conformance against a real server:
+# blob store and full conformance against S3:
 GS_TEST_S3_ENDPOINT=http://127.0.0.1:8333 GS_TEST_S3_BUCKET=test \
-GS_TEST_S3_ACCESS_KEY=... GS_TEST_S3_SECRET_KEY=... go test ./internal/storage
+GS_TEST_S3_ACCESS_KEY=... GS_TEST_S3_SECRET_KEY=... go test ./internal/...
 ```
+
+`internal/storage` runs the protocol conformance suite from
+`anime.bike/remotestorage/pkg/rsserver/rstest` against SQLite plus each blob backend.

@@ -7,6 +7,6 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /gopherstorage ./cmd/go
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /gopherstorage /gopherstorage
-VOLUME /data
+VOLUME /var/lib/gopherstorage
 EXPOSE 8080
 ENTRYPOINT ["/gopherstorage", "-config", "/config/config.yaml"]

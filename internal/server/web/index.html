@@ -9,32 +9,38 @@
 </head>
 <body>
 <header>
-  <a class="brand" href="/">gopherstorage</a>
+  <span class="brand">gopherstorage</span>
   <span id="who"></span>
 </header>
 <main>
   <section id="login" hidden>
-    <p>You are not signed in.</p>
-    <a class="button" id="login-link" href="/auth/login">Sign in</a>
+    <h1>Your remoteStorage server</h1>
+    <p>Sign in to get your storage address and manage the apps that can use it.</p>
+    <a class="button primary" id="login-link" href="/auth/login">Sign in</a>
   </section>
-  <section id="app" hidden>
-    <nav id="mounts"></nav>
-    <div id="toolbar">
-      <div id="crumbs"></div>
-      <div class="actions">
-        <button id="mkdir" type="button">New folder</button>
-        <label class="button" id="upload-label">Upload<input id="upload" type="file" multiple hidden></label>
-      </div>
-    </div>
-    <div id="status"></div>
-    <div id="drop">
-      <table id="listing">
-        <thead><tr><th>Name</th><th class="num">Size</th><th>Modified</th><th></th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <p id="empty" hidden>This folder is empty.</p>
-    </div>
+
+  <section id="account" hidden>
+    <h2>Your storage address</h2>
+    <p class="dim">Enter this in any <a href="https://remotestorage.io/apps/" rel="noopener">remoteStorage app</a> to connect it.</p>
+    <div class="address"><code id="address"></code><button id="copy" type="button">Copy</button></div>
+
+    <h2>Usage</h2>
+    <p id="usage"></p>
+    <div class="meter" id="meter" hidden><div id="meter-bar"></div></div>
+
+    <h2>Connected apps</h2>
+    <p id="no-apps" class="dim" hidden>No apps connected yet.</p>
+    <table id="apps" hidden>
+      <thead><tr><th>App</th><th>Access</th><th>Last used</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+
+    <section id="admin" hidden>
+      <h2>Users</h2>
+      <table id="users"><thead><tr><th>User</th><th class="num">Used</th><th class="num">Quota</th><th>Last login</th><th></th></tr></thead><tbody></tbody></table>
+    </section>
   </section>
+  <p id="status"></p>
 </main>
 </body>
 </html>
