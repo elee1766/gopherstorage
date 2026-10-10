@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -111,12 +112,46 @@ func conformance(t *testing.T, b Backend) {
 		t.Fatalf("unknown size upload stored %d bytes", e.Size)
 	}
 
+	// Large unknown size upload goes through multipart on S3.
+	big := make([]byte, 40<<20+123)
+	rand.Read(big)
+	if _, err := b.Put(ctx, "big.bin", struct{ io.Reader }{bytes.NewReader(big)}, -1, ""); err != nil {
+		t.Fatalf("put large: %v", err)
+	}
+	br, be, err := b.Open(ctx, "big.bin")
+	if err != nil || be.Size != int64(len(big)) {
+		t.Fatalf("open large: %+v %v", be, err)
+	}
+	if _, err := br.Seek(30<<20, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	tail, _ := io.ReadAll(br)
+	br.Close()
+	if !bytes.Equal(tail, big[30<<20:]) {
+		t.Fatalf("large upload tail mismatch: got %d bytes", len(tail))
+	}
+	if err := b.Delete(ctx, "big.bin", false); err != nil {
+		t.Fatal(err)
+	}
+
 	// Writing over or under a file is rejected.
 	_, err = b.Put(ctx, "a", strings.NewReader("x"), 1, "")
 	expectErr(err, ErrIsDir, "put over dir")
 	_, err = b.Put(ctx, "a/b/c.txt/d", strings.NewReader("x"), 1, "")
 	expectErr(err, ErrNotDir, "put under file")
 	expectErr(b.Mkdir(ctx, "a/b/c.txt"), ErrExist, "mkdir over file")
+
+	// Keys needing escaping survive copy (CopySource encoding).
+	put("odd/a b+c%d.txt", "odd")
+	if err := b.Move(ctx, "odd/a b+c%d.txt", "odd/é ü&.txt"); err != nil {
+		t.Fatalf("move odd name: %v", err)
+	}
+	if got := read("odd/é ü&.txt"); got != "odd" {
+		t.Fatalf("odd name content %q", got)
+	}
+	if err := b.Delete(ctx, "odd", true); err != nil {
+		t.Fatal(err)
+	}
 
 	// Empty directories persist and are listed.
 	if err := b.Mkdir(ctx, "empty/nested"); err != nil {

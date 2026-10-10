@@ -168,8 +168,8 @@ func (c *Config) Validate() error {
 				errs = append(errs, fmt.Errorf("backend %q: path is required", name))
 			}
 		case "s3":
-			if b.Endpoint == "" || b.Bucket == "" {
-				errs = append(errs, fmt.Errorf("backend %q: endpoint and bucket are required", name))
+			if b.Bucket == "" {
+				errs = append(errs, fmt.Errorf("backend %q: bucket is required", name))
 			}
 		default:
 			errs = append(errs, fmt.Errorf("backend %q: unknown type %q (want filesystem or s3)", name, b.Type))

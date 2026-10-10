@@ -51,7 +51,7 @@ See [`config.example.yaml`](config.example.yaml) for every option.
 | type | notes |
 | --- | --- |
 | `filesystem` | All access goes through `os.Root`, so symlinks cannot escape `path`. Writes go to a temp file and are renamed into place. |
-| `s3` | Directories are key prefixes. Empty folders are stored as zero byte `dir/` marker objects. Moving a directory is copy then delete, so it is not atomic. Set `path_style: true` for most self-hosted servers. |
+| `s3` | Uses `aws-sdk-go-v2`. Leave `endpoint` empty for AWS S3, set it for other providers. Directories are key prefixes. Empty folders are stored as zero byte `dir/` marker objects. Moving a directory is copy then delete, so it is not atomic. Set `path_style: true` for most self-hosted servers. |
 
 The S3 backend is tested against SeaweedFS, RustFS and VersityGW.
 
