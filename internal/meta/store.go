@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/pressly/goose/v3"
@@ -192,8 +191,4 @@ func (s *Store) SetQuota(ctx context.Context, userID, quota int64) error {
 		_, err := tx.ExecContext(ctx, `UPDATE users SET quota_bytes = ? WHERE id = ?`, quota, userID)
 		return err
 	})
-}
-
-func escapeLike(s string) string {
-	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }

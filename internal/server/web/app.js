@@ -128,14 +128,30 @@ async function load() {
   $("#apps").hidden = acct.grants.length === 0;
   $("#no-apps").hidden = acct.grants.length > 0;
 
+  const sbody = $("#shared tbody");
+  sbody.replaceChildren();
+  for (const f of acct.shared) {
+    sbody.append(el("tr", {},
+      el("td", {}, el("a", { href: f.url, target: "_blank", rel: "noopener" }, f.path.replace(/^\/public\//, "")),
+        el("div", { class: "dim small" }, f.content_type)),
+      el("td", { class: "num" }, fmtSize(f.size)),
+      el("td", {}, fmtTime(f.modified)),
+      el("td", { class: "ops" }, el("button", { type: "button", class: "small", onclick: () => copyText(f.url) }, "Copy link")),
+    ));
+  }
+  $("#shared").hidden = acct.shared.length === 0;
+  $("#no-shared").hidden = acct.shared.length > 0;
+
   if (acct.admin) loadAdmin().catch((e) => setStatus(e.message, true));
 }
 
-$("#copy").addEventListener("click", async () => {
+async function copyText(text) {
   try {
-    await navigator.clipboard.writeText($("#address").textContent);
+    await navigator.clipboard.writeText(text);
     setStatus("Copied.");
-  } catch { setStatus("Copy failed, select the address manually.", true); }
-});
+  } catch { setStatus("Copy failed: " + text, true); }
+}
+
+$("#copy").addEventListener("click", () => copyText($("#address").textContent));
 
 load();

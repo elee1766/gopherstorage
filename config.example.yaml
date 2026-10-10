@@ -50,3 +50,13 @@ tokens:
   # Lifetime of tokens issued to apps. 0 = until revoked on the account page.
   # remoteStorage apps have no refresh flow, so short TTLs force re-connecting.
   ttl: 0s
+
+view:
+  # /view/<user>/<path> shows /public/<path> in browsers (share links, embeds).
+  # Recommended: a separate host pointed at this server, so shared HTML/SVG can
+  # never touch account cookies. When set, /view/ only answers on this host and
+  # this host serves nothing else. Empty = /view/ on public_url.
+  # url: https://share.example.com
+  # Let browsers and CDNs reuse responses for this long without revalidating.
+  # 0 = always revalidate (cheap 304s), so edits show up immediately.
+  cache_max_age: 0s

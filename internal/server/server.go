@@ -122,17 +122,24 @@ func (s *Server) Handler() http.Handler {
 	return logRequests(s.protectUI(s.routeStorage(mux)))
 }
 
-// routeStorage sends /storage/ requests straight to the remoteStorage handler.
+// routeStorage sends /storage/ and /view/ requests straight to their handlers.
 // http.ServeMux would clean paths like "a//b" or "a/./b" and redirect,
-// instead of letting the handler reject them.
+// instead of letting the handler reject them. When a separate view host is
+// configured, that host serves nothing but /view/.
 func (s *Server) routeStorage(mux http.Handler) http.Handler {
 	storage := http.StripPrefix(strings.TrimSuffix(StoragePrefix, "/"), s.rs)
+	vh := s.cfg.ViewHost()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, StoragePrefix) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, ViewPrefix):
+			s.handleView(w, r)
+		case vh != "" && strings.EqualFold(r.Host, vh):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.Path, StoragePrefix):
 			storage.ServeHTTP(w, r)
-			return
+		default:
+			mux.ServeHTTP(w, r)
 		}
-		mux.ServeHTTP(w, r)
 	})
 }
 
@@ -146,7 +153,7 @@ func (s *Server) protectUI(next http.Handler) http.Handler {
 	cop.AddInsecureBypassPattern("/.well-known/webfinger")
 	return cop.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		if !strings.HasPrefix(r.URL.Path, StoragePrefix) {
+		if !strings.HasPrefix(r.URL.Path, StoragePrefix) && !strings.HasPrefix(r.URL.Path, ViewPrefix) {
 			w.Header().Set("Referrer-Policy", "same-origin")
 		}
 		next.ServeHTTP(w, r)
@@ -225,6 +232,19 @@ func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
 	if quota == 0 {
 		quota = s.cfg.Storage.DefaultQuotaBytes
 	}
+	pub, err := s.store.ListPublic(ctx, u.ID, 50)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "shared lookup failed")
+		return
+	}
+	shared := []map[string]any{}
+	for _, n := range pub {
+		ct, _ := viewType(n.ContentType, rs.BaseName(n.Path))
+		shared = append(shared, map[string]any{
+			"path": n.Path, "url": s.ViewURL(u.Username, n.Path), "content_type": ct,
+			"size": n.Size, "modified": n.Modified,
+		})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"username":     u.Username,
 		"name":         sess.Name,
@@ -235,6 +255,7 @@ func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
 		"documents":    docs,
 		"admin":        sess.Admin,
 		"grants":       gv,
+		"shared":       shared,
 	})
 }
 

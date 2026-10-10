@@ -49,6 +49,7 @@ renames their storage address.
 | --- | --- |
 | `/.well-known/webfinger` | discovery for `acct:user@host` |
 | `/storage/<user>/...` | the remoteStorage API |
+| `/view/<user>/<path>` | shows `/public/<path>` in browsers, for sharing and embedding |
 | `/oauth/authorize` | app authorization (implicit and PKCE) with a consent page |
 | `/oauth/token` | PKCE token endpoint |
 | `/` | account page |
@@ -57,6 +58,28 @@ WebFinger must be served on the host of the user address. If `public_url` is not
 apex of your domain, proxy `https://example.com/.well-known/webfinger` to gopherstorage
 and keep `public_url` matching that host, or use a dedicated host such as
 `storage.example.com` for both.
+
+## Sharing
+
+Anything an app stores under `/public/` can be read by anyone (that is the
+remoteStorage model). `/view/` presents those documents for people rather than apps:
+
+- the stored `Content-Type`, or one derived from the file extension when an app
+  stored `application/octet-stream`
+- `Content-Disposition: inline` with the file name for images, audio, video, PDF and
+  text; other types download (`?download` forces a download)
+- `Range` requests for seeking in audio and video, `ETag` / `Last-Modified` with 304s
+- CORS and `Cross-Origin-Resource-Policy: cross-origin`, so media can be embedded
+  in other sites and read by `fetch`
+- HTML and SVG render inside a CSP `sandbox` (no scripts, opaque origin), and all
+  responses send `X-Content-Type-Options: nosniff`
+
+Set `view.url` to a separate host (for example `share.example.com`, pointed at the
+same server) to keep shared files off the account origin. The account page lists
+shared documents with copyable links.
+
+Example: `PUT /storage/alice/public/photos/cat.jpg` is shown at
+`https://share.example.com/view/alice/photos/cat.jpg`.
 
 ## Storage
 

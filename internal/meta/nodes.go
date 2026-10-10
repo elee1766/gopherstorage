@@ -360,3 +360,23 @@ func (s *Store) Usage(ctx context.Context, userID int64) (docs, bytes int64, err
 	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(size), 0) FROM nodes WHERE user_id = ? AND is_folder = 0`, userID).Scan(&docs, &bytes)
 	return docs, bytes, err
 }
+
+// ListPublic returns up to limit documents under /public/, newest first.
+func (s *Store) ListPublic(ctx context.Context, userID int64, limit int) ([]*Node, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+nodeCols+` FROM nodes
+		WHERE user_id = ? AND is_folder = 0 AND path >= '/public/' AND path < '/public0'
+		ORDER BY modified_at DESC, path LIMIT ?`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Node
+	for rows.Next() {
+		n, err := scanNode(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
