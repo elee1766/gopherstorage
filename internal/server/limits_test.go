@@ -175,6 +175,15 @@ func TestDisabledUserIsHiddenFromPublicStorageAndWebFinger(t *testing.T) {
 	if w := do("/storage/alice/public/note.txt"); w.Code != http.StatusOK {
 		t.Fatalf("public storage fixture was not readable before disable: %d", w.Code)
 	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	r := httptest.NewRequest(http.MethodGet, "http://storage.test/.well-known/webfinger?resource=acct:alice@storage.test", nil).WithContext(canceled)
+	r.RemoteAddr = "192.0.2.30:12345"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("canceled WebFinger lookup returned %d, want lookup failure", w.Code)
+	}
 	if err := store.SetUserDisabled(ctx, u.ID, true); err != nil {
 		t.Fatal(err)
 	}

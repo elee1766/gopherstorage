@@ -161,27 +161,29 @@ func (s *Server) protectUI(next http.Handler) http.Handler {
 
 func (s *Server) webfinger() http.Handler {
 	authz := s.cfg.PublicURL + "/oauth/authorize"
-	wf := webfinger.NewServer(s.cfg.Host(), webfinger.StorageResolverFunc(func(user string) (*webfinger.UserStorageInfo, error) {
-		user = strings.ToLower(user)
-		if !auth.ValidUsername(user) {
-			return nil, nil
-		}
-		u, err := s.store.UserByName(context.Background(), user)
-		if errors.Is(err, meta.ErrNotFound) {
-			return nil, nil
-		} else if err != nil {
-			return nil, err
-		} else if u.Disabled {
-			return nil, nil
-		}
-		return &webfinger.UserStorageInfo{
-			StorageRoot:         s.cfg.PublicURL + StoragePrefix + user,
-			AuthEndpoint:        &authz,
-			TokenEndpoint:       s.cfg.PublicURL + "/oauth/token",
-			RangeRequestSupport: "GET",
-		}, nil
-	}))
-	return wf
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wf := webfinger.NewServer(s.cfg.Host(), webfinger.StorageResolverFunc(func(user string) (*webfinger.UserStorageInfo, error) {
+			user = strings.ToLower(user)
+			if !auth.ValidUsername(user) {
+				return nil, nil
+			}
+			u, err := s.store.UserByName(r.Context(), user)
+			if errors.Is(err, meta.ErrNotFound) {
+				return nil, nil
+			} else if err != nil {
+				return nil, err
+			} else if u.Disabled {
+				return nil, nil
+			}
+			return &webfinger.UserStorageInfo{
+				StorageRoot:         s.cfg.PublicURL + StoragePrefix + user,
+				AuthEndpoint:        &authz,
+				TokenEndpoint:       s.cfg.PublicURL + "/oauth/token",
+				RangeRequestSupport: "GET",
+			}, nil
+		}))
+		wf.ServeHTTP(w, r)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
