@@ -1,0 +1,70 @@
+# gopherstorage example config. ${VAR} is replaced from the environment;
+# an unset variable is an error.
+
+listen: ":8080"
+# The URL users open. The OIDC redirect URI is <public_url>/auth/callback.
+public_url: https://files.example.com
+# Per-upload limit in bytes. 0 or unset means unlimited.
+max_upload_bytes: 10737418240
+
+oidc:
+  # Pocket ID: the issuer is the APP_URL of your Pocket ID instance.
+  issuer: https://id.example.com
+  client_id: ${GS_OIDC_CLIENT_ID}
+  client_secret: ${GS_OIDC_CLIENT_SECRET}
+  # Defaults shown. Pocket ID sends groups when the "groups" scope is requested.
+  scopes: [openid, profile, email, groups]
+  username_claim: preferred_username
+  groups_claim: groups
+  # Members of these groups can read and write every mount.
+  admin_groups: [storage-admins]
+  # If set, only members of these groups can sign in.
+  # allowed_groups: [storage-users]
+
+session:
+  # Encrypts session cookies. Generate with: openssl rand -hex 32
+  secret: ${GS_SESSION_SECRET}
+  max_age: 12h
+
+backends:
+  local:
+    type: filesystem
+    path: /data
+
+  s3:
+    type: s3
+    # Any S3 compatible endpoint: AWS, Cloudflare R2, Backblaze B2, Garage,
+    # SeaweedFS, RustFS, VersityGW, MinIO, ...
+    endpoint: https://s3.us-east-1.amazonaws.com
+    region: us-east-1
+    bucket: my-bucket
+    # Optional key prefix inside the bucket.
+    prefix: gopherstorage
+    # If omitted, credentials come from AWS_* env vars, ~/.aws/credentials or IAM.
+    access_key: ${GS_S3_ACCESS_KEY}
+    secret_key: ${GS_S3_SECRET_KEY}
+    # Set for most self-hosted servers.
+    path_style: false
+    # Use plain http (or write http:// in the endpoint).
+    insecure: false
+
+# Mounts are what users see. Access rules:
+#   "*"              any signed-in user
+#   "user:<name>"    username (username_claim)
+#   "sub:<id>"       OIDC subject
+#   "email:<addr>"   email address
+#   "group:<name>"   group membership
+# Write access implies read access. Admin groups can access everything.
+mounts:
+  - name: shared
+    backend: local
+    path: shared
+    read: ["*"]
+    write: ["group:storage-admins", "group:editors"]
+
+  # {username}, {sub} or {email} make a per-user mount. Each user only sees
+  # their own directory.
+  - name: home
+    backend: s3
+    path: "users/{username}"
+    write: ["*"]

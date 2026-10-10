@@ -80,21 +80,27 @@ func (m Mount) PerUser() bool {
 
 var envRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
-// expandEnv replaces ${VAR} references. ${VAR} with VAR unset is an error.
+// expandEnv replaces ${VAR} references outside comment lines. ${VAR} with VAR unset is an error.
 func expandEnv(s string) (string, error) {
 	var missing []string
-	out := envRef.ReplaceAllStringFunc(s, func(m string) string {
-		name := envRef.FindStringSubmatch(m)[1]
-		v, ok := os.LookupEnv(name)
-		if !ok {
-			missing = append(missing, name)
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
 		}
-		return v
-	})
+		lines[i] = envRef.ReplaceAllStringFunc(line, func(m string) string {
+			name := envRef.FindStringSubmatch(m)[1]
+			v, ok := os.LookupEnv(name)
+			if !ok {
+				missing = append(missing, name)
+			}
+			return v
+		})
+	}
 	if len(missing) > 0 {
 		return "", fmt.Errorf("unset environment variables: %s", strings.Join(missing, ", "))
 	}
-	return out, nil
+	return strings.Join(lines, "\n"), nil
 }
 
 func Load(path string) (*Config, error) {

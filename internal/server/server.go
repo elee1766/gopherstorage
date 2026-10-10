@@ -166,13 +166,11 @@ func (s *Server) target(w http.ResponseWriter, r *http.Request, write bool) (sto
 		jsonError(w, http.StatusForbidden, err.Error())
 		return nil, "", false
 	}
-	if m.cfg.PerUser() {
-		// Lazily create the user's home directory.
-		if _, err := b.Stat(r.Context(), ""); errors.Is(err, storage.ErrNotExist) {
-			if err := b.Mkdir(r.Context(), ""); err != nil {
-				s.storageError(w, r, err)
-				return nil, "", false
-			}
+	// Create the mount root on first use so new mounts and user homes list as empty.
+	if _, err := b.Stat(r.Context(), ""); errors.Is(err, storage.ErrNotExist) {
+		if err := b.Mkdir(r.Context(), ""); err != nil {
+			s.storageError(w, r, err)
+			return nil, "", false
 		}
 	}
 	return b, p, true

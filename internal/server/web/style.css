@@ -26,7 +26,7 @@ button, .button {
 }
 button:hover, .button:hover { border-color: var(--accent); }
 button.danger { color: var(--danger); }
-button.small { padding: 2px 8px; font-size: 13px; }
+button.small, .button.small { padding: 2px 8px; font-size: 13px; }
 #mounts { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
 #mounts a { padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); text-decoration: none; color: var(--fg); }
 #mounts a.active { border-color: var(--accent); color: var(--accent); }
