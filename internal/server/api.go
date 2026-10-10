@@ -5,11 +5,13 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"time"
 
 	"anime.bike/remotestorage/pkg/rs"
+	"anime.bike/remotestorage/pkg/rsserver"
 
 	"github.com/elee1766/gopherstorage/internal/meta"
 )
@@ -28,12 +30,13 @@ type principal struct {
 // accepts the session cookie, so it needs no CSRF protection; the browser UI
 // uses its own /ui/ endpoints.
 func (s *Server) caller(w http.ResponseWriter, r *http.Request) *principal {
-	tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok || !strings.HasPrefix(tok, APITokenPrefix) {
+	parts := strings.Fields(r.Header.Get("Authorization"))
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || !strings.HasPrefix(parts[1], APITokenPrefix) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="gopherstorage"`)
 		jsonError(w, http.StatusUnauthorized, "send an API token: Authorization: Bearer "+APITokenPrefix+"... (create one on the account page)")
 		return nil
 	}
+	tok := parts[1]
 	at, u, err := s.store.LookupAPIToken(r.Context(), tok)
 	if err != nil {
 		if !errors.Is(err, meta.ErrNotFound) {
@@ -46,6 +49,16 @@ func (s *Server) caller(w http.ResponseWriter, r *http.Request) *principal {
 	return &principal{user: u, tokenID: at.ID}
 }
 
+const adminLoginFreshness = 15 * time.Minute
+
+func isFreshAdmin(u *meta.User) bool {
+	if u == nil || !u.IsAdmin || u.LastLogin.IsZero() {
+		return false
+	}
+	age := time.Since(u.LastLogin)
+	return age >= 0 && age <= adminLoginFreshness
+}
+
 // apiHandler wraps an account API handler with authentication.
 func (s *Server) apiHandler(adminOnly bool, h func(http.ResponseWriter, *http.Request, *principal)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -53,8 +66,8 @@ func (s *Server) apiHandler(adminOnly bool, h func(http.ResponseWriter, *http.Re
 		if p == nil {
 			return
 		}
-		if adminOnly && !p.user.IsAdmin {
-			jsonError(w, http.StatusForbidden, "admins only")
+		if adminOnly && !isFreshAdmin(p.user) {
+			jsonError(w, http.StatusForbidden, "sign in again to verify administrator access")
 			return
 		}
 		h(w, r, p)
@@ -66,10 +79,12 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/grants", s.apiHandler(false, s.apiGrants))
 	mux.HandleFunc("DELETE /api/v1/grants/{id}", s.apiHandler(false, s.apiRevokeGrant))
 	mux.HandleFunc("GET /api/v1/shared", s.apiHandler(false, s.apiShared))
+	mux.HandleFunc("DELETE /api/v1/shared", s.apiHandler(false, s.apiUnpublish))
 	mux.HandleFunc("GET /api/v1/tokens", s.apiHandler(false, s.apiTokens))
 	mux.HandleFunc("DELETE /api/v1/tokens/{id}", s.apiHandler(false, s.apiDeleteToken))
 	mux.HandleFunc("GET /api/v1/admin/users", s.apiHandler(true, s.apiAdminUsers))
 	mux.HandleFunc("PUT /api/v1/admin/users/{id}/quota", s.apiHandler(true, s.apiSetQuota))
+	registerLifecycleAPI(mux, s)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) { jsonError(w, http.StatusNotFound, "no such endpoint") })
 }
 
@@ -95,7 +110,7 @@ func (s *Server) apiAccount(w http.ResponseWriter, r *http.Request, p *principal
 		"used_bytes":   u.UsedBytes,
 		"quota_bytes":  s.effectiveQuota(u),
 		"documents":    docs,
-		"admin":        u.IsAdmin,
+		"admin":        isFreshAdmin(u),
 	})
 }
 
@@ -188,6 +203,32 @@ func (s *Server) apiShared(w http.ResponseWriter, r *http.Request, p *principal)
 	writeJSON(w, http.StatusOK, map[string]any{"shared": out})
 }
 
+func (s *Server) apiUnpublish(w http.ResponseWriter, r *http.Request, p *principal) {
+	publicPath, ok := canonicalPublicDocument(r.URL.Query().Get("path"))
+	if !ok {
+		jsonError(w, http.StatusBadRequest, "path must identify a document under /public/")
+		return
+	}
+	if _, err := s.storage.ForUser(p.user).Delete(r.Context(), publicPath, rsserver.Condition{}); err != nil {
+		if errors.Is(err, rs.ErrNotFound) {
+			jsonError(w, http.StatusNotFound, "not found")
+		} else {
+			slog.Error("unpublish", "user", p.user.Username, "path", publicPath, "err", err)
+			jsonError(w, http.StatusInternalServerError, "unpublish failed")
+		}
+		return
+	}
+	slog.Info("shared file unpublished", "user", p.user.Username, "path", publicPath, "via", "api")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func canonicalPublicDocument(p string) (string, bool) {
+	if !strings.HasPrefix(p, "/public/") || strings.HasSuffix(p, "/") || path.Clean(p) != p || rs.ValidatePath(p) != nil || rs.IsFolderPath(p) {
+		return "", false
+	}
+	return p, true
+}
+
 type tokenView struct {
 	ID       int64     `json:"id"`
 	Name     string    `json:"name"`
@@ -246,6 +287,7 @@ type userView struct {
 	UsedBytes  int64     `json:"used_bytes"`
 	QuotaBytes int64     `json:"quota_bytes"`
 	LastLogin  time.Time `json:"last_login"`
+	Disabled   bool      `json:"disabled"`
 }
 
 func (s *Server) users(r *http.Request) ([]userView, error) {
@@ -256,7 +298,7 @@ func (s *Server) users(r *http.Request) ([]userView, error) {
 	out := []userView{}
 	for _, u := range users {
 		out = append(out, userView{ID: u.ID, Username: u.Username, Email: u.Email, Admin: u.IsAdmin,
-			UsedBytes: u.UsedBytes, QuotaBytes: u.QuotaBytes, LastLogin: u.LastLogin})
+			UsedBytes: u.UsedBytes, QuotaBytes: u.QuotaBytes, LastLogin: u.LastLogin, Disabled: u.Disabled})
 	}
 	return out, nil
 }

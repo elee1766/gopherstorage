@@ -40,6 +40,17 @@ func Open(ctx context.Context, path string) (*Store, error) {
 			return nil, err
 		}
 	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err := f.Close(); err != nil {
+		return nil, err
+	}
 	dsn := func(txlock string) string {
 		q := url.Values{}
 		for _, p := range []string{"journal_mode(WAL)", "synchronous(NORMAL)", "foreign_keys(ON)", "busy_timeout(10000)"} {
@@ -111,21 +122,23 @@ type User struct {
 	CreatedAt  time.Time
 	LastLogin  time.Time
 	// IsAdmin reflects the OIDC groups at the last login.
-	IsAdmin bool
+	IsAdmin  bool
+	Disabled bool
 }
 
-const userCols = `id, sub, username, email, quota_bytes, used_bytes, created_at, last_login, is_admin`
+const userCols = `id, sub, username, email, quota_bytes, used_bytes, created_at, last_login, is_admin, disabled`
 
 func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	var u User
 	var created, login int64
-	if err := row.Scan(&u.ID, &u.Sub, &u.Username, &u.Email, &u.QuotaBytes, &u.UsedBytes, &created, &login, &u.IsAdmin); err != nil {
+	var disabled bool
+	if err := row.Scan(&u.ID, &u.Sub, &u.Username, &u.Email, &u.QuotaBytes, &u.UsedBytes, &created, &login, &u.IsAdmin, &disabled); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
-	u.CreatedAt, u.LastLogin = time.Unix(created, 0), time.Unix(login, 0)
+	u.CreatedAt, u.LastLogin, u.Disabled = time.Unix(created, 0), time.Unix(login, 0), disabled
 	return &u, nil
 }
 
@@ -155,10 +168,18 @@ func (s *Store) UpsertUser(ctx context.Context, l Login) (*User, error) {
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO users (sub, username, email, created_at, last_login, is_admin) VALUES (?, ?, ?, ?, ?, ?)
 			ON CONFLICT (sub) DO UPDATE SET username = excluded.username, email = excluded.email,
-				last_login = excluded.last_login, is_admin = excluded.is_admin`,
+				last_login = excluded.last_login, is_admin = excluded.is_admin
+			WHERE users.disabled = 0`,
 			l.Sub, l.Username, l.Email, t, t, l.IsAdmin)
 		if err != nil {
 			return err
+		}
+		var disabled bool
+		if err := tx.QueryRowContext(ctx, `SELECT disabled FROM users WHERE sub=?`, l.Sub).Scan(&disabled); err != nil {
+			return err
+		}
+		if disabled {
+			return ErrAccountDisabled
 		}
 		u, err = scanUser(tx.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE sub = ?`, l.Sub))
 		return err
@@ -174,6 +195,11 @@ func (s *Store) UserByName(ctx context.Context, username string) (*User, error) 
 // UserByID returns a user by id.
 func (s *Store) UserByID(ctx context.Context, id int64) (*User, error) {
 	return scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE id = ?`, id))
+}
+
+// UserBySub returns a user by OIDC subject.
+func (s *Store) UserBySub(ctx context.Context, sub string) (*User, error) {
+	return scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE sub = ?`, sub))
 }
 
 // ListUsers returns all users ordered by username.

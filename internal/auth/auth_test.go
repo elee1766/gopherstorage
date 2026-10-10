@@ -1,14 +1,47 @@
 package auth
 
 import (
+	"context"
+	"database/sql"
+	"errors"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elee1766/gopherstorage/internal/config"
+	"github.com/elee1766/gopherstorage/internal/meta"
 	"golang.org/x/oauth2"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestOIDCTransportRejectsUnsafeDiscoveredURLs(t *testing.T) {
+	called := false
+	transport := endpointGuardTransport{
+		allowInsecure: false,
+		base: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			called = true
+			return nil, errors.New("unexpected transport call")
+		}),
+	}
+	for _, raw := range []string{
+		"http://identity.example/token",
+		"https://user:password@identity.example/jwks",
+	} {
+		req := httptest.NewRequest(http.MethodGet, raw, nil)
+		if _, err := transport.RoundTrip(req); err == nil {
+			t.Errorf("RoundTrip(%q) succeeded, want rejection", raw)
+		}
+	}
+	if called {
+		t.Fatal("unsafe endpoint reached the underlying transport")
+	}
+}
 
 func TestCallbackBadStateKeepsFlowCookie(t *testing.T) {
 	flow, err := newSealer(strings.Repeat("f", 32), "flow")
@@ -47,6 +80,75 @@ func TestCallbackBadStateKeepsFlowCookie(t *testing.T) {
 	}
 	if values := callbackRes.Header().Values("Set-Cookie"); len(values) != 0 {
 		t.Fatalf("bad-state callback changed cookies: %v", values)
+	}
+}
+
+func TestLegacySealedSessionWithoutDatabaseIDFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	store, err := meta.Open(ctx, t.TempDir()+"/meta.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	u, err := store.UpsertUser(ctx, meta.Login{Sub: "legacy-user", Username: "legacy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Session: config.Session{Secret: strings.Repeat("s", 32), MaxAge: time.Hour}}
+	a, err := NewSessionsOnly(cfg, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := a.session.seal(&Session{UserID: u.ID, Username: u.Username}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("GET", "http://storage.test/", nil)
+	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: legacy})
+	if got := a.Current(r); got != nil {
+		t.Fatalf("legacy cookie without a persisted session was accepted: %+v", got)
+	}
+}
+
+func TestPersistedSessionExpiryInvalidatesCookie(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/meta.db"
+	store, err := meta.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	u, err := store.UpsertUser(ctx, meta.Login{Sub: "expiry-user", Username: "expiry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Session: config.Session{Secret: strings.Repeat("e", 32), MaxAge: time.Hour}}
+	a, err := NewSessionsOnly(cfg, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie, err := a.SessionCookie(&Session{UserID: u.ID, Username: u.Username})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("GET", "http://storage.test/", nil)
+	r.AddCookie(cookie)
+	if a.Current(r) == nil {
+		t.Fatal("new persisted session was not accepted")
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE sessions SET expires_at=? WHERE user_id=?`, time.Now().Add(-time.Minute).Unix(), u.ID); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if a.Current(r) != nil {
+		t.Fatal("cookie remained valid after persisted session expiration")
 	}
 }
 

@@ -123,6 +123,7 @@ type User struct {
 	UsedBytes  int64
 	QuotaBytes int64
 	LastLogin  time.Time
+	Disabled   bool
 }
 
 type Users struct {

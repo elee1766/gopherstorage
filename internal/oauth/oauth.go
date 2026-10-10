@@ -11,6 +11,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -28,9 +29,10 @@ import (
 const codeTTL = 5 * time.Minute
 
 type Server struct {
-	Auth     *auth.Authenticator
-	Store    *meta.Store
-	TokenTTL time.Duration
+	Auth          *auth.Authenticator
+	Store         *meta.Store
+	TokenTTL      time.Duration
+	AllowImplicit bool
 	// CSRFKey signs consent forms.
 	CSRFKey []byte
 }
@@ -133,6 +135,10 @@ func (s *Server) parse(w http.ResponseWriter, r *http.Request) (*request, bool) 
 	}
 	switch q.ResponseType {
 	case "token":
+		if !s.AllowImplicit {
+			q.errorRedirect(w, r, "unsupported_response_type", "The implicit flow is disabled.")
+			return nil, false
+		}
 	case "code":
 		if q.CodeChallengeMethod != rs.PKCEMethodS256 || !rs.ValidS256Challenge(q.CodeChallenge) {
 			q.errorRedirect(w, r, "invalid_request", "PKCE with code_challenge_method=S256 is required")
@@ -194,6 +200,10 @@ func (s *Server) grant(w http.ResponseWriter, r *http.Request, sess *auth.Sessio
 	scope := rs.FormatScopes(q.scopes)
 	grantID, err := s.Store.UpsertGrant(ctx, sess.UserID, q.origin, q.redirect.Host, scope)
 	if err != nil {
+		if errors.Is(err, meta.ErrCredentialLimit) {
+			q.errorRedirect(w, r, "temporarily_unavailable", "The account has reached its credential limit. Revoke existing app access and try again.")
+			return
+		}
 		slog.Error("grant", "err", err)
 		q.errorRedirect(w, r, "server_error", "")
 		return
@@ -204,6 +214,10 @@ func (s *Server) grant(w http.ResponseWriter, r *http.Request, sess *auth.Sessio
 		if err := s.Store.SaveAuthCode(ctx, code, meta.AuthCode{
 			GrantID: grantID, RedirectURI: q.RedirectURI, Scope: scope, CodeChallenge: q.CodeChallenge,
 		}, codeTTL); err != nil {
+			if errors.Is(err, meta.ErrCredentialLimit) {
+				q.errorRedirect(w, r, "temporarily_unavailable", "The account has reached its credential limit. Revoke existing app access and try again.")
+				return
+			}
 			slog.Error("save code", "err", err)
 			q.errorRedirect(w, r, "server_error", "")
 			return
@@ -217,6 +231,10 @@ func (s *Server) grant(w http.ResponseWriter, r *http.Request, sess *auth.Sessio
 	} else {
 		tok, err := s.issue(ctx, grantID, scope)
 		if err != nil {
+			if errors.Is(err, meta.ErrCredentialLimit) {
+				q.errorRedirect(w, r, "temporarily_unavailable", "The account has reached its credential limit. Revoke existing app access and try again.")
+				return
+			}
 			slog.Error("issue token", "err", err)
 			q.errorRedirect(w, r, "server_error", "")
 			return
@@ -290,6 +308,10 @@ func (s *Server) Token(w http.ResponseWriter, r *http.Request) {
 	}
 	tok, err := s.issue(r.Context(), ac.GrantID, ac.Scope)
 	if err != nil {
+		if errors.Is(err, meta.ErrCredentialLimit) {
+			oauthErrorStatus(w, http.StatusTooManyRequests, "temporarily_unavailable")
+			return
+		}
 		slog.Error("issue token", "err", err)
 		oauthError(w, "server_error")
 		return
@@ -304,9 +326,13 @@ func (s *Server) Token(w http.ResponseWriter, r *http.Request) {
 }
 
 func oauthError(w http.ResponseWriter, code string) {
+	oauthErrorStatus(w, http.StatusBadRequest, code)
+}
+
+func oauthErrorStatus(w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusBadRequest)
+	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": code})
 }
 

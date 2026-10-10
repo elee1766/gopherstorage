@@ -5,9 +5,15 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -24,9 +30,11 @@ import (
 )
 
 const (
-	sessionCookie = "gs_session"
-	flowCookie    = "gs_flow"
-	flowTTL       = 10 * time.Minute
+	sessionCookie   = "gs_session"
+	flowCookie      = "gs_flow"
+	flowTTL         = 10 * time.Minute
+	authHTTPTimeout = 30 * time.Second
+	logoutEvent     = "http://schemas.openid.net/event/backchannel-logout"
 )
 
 // Session is the logged-in user, stored in an encrypted cookie.
@@ -35,47 +43,122 @@ type Session struct {
 	Username string `json:"u"`
 	Name     string `json:"n,omitempty"`
 	// Admin is a login-time snapshot. Authorize against the current database role.
-	Admin bool `json:"a,omitempty"`
+	Admin     bool   `json:"a,omitempty"`
+	SessionID string `json:"j,omitempty"`
 }
 
 type Authenticator struct {
-	cfg       config.OIDC
-	publicURL string
-	maxAge    time.Duration
-	secure    bool
-	provider  *oidc.Provider
-	verifier  *oidc.IDTokenVerifier
-	oauth     oauth2.Config
-	session   *sealer
-	flow      *sealer
-	endSess   string
-	store     *meta.Store
+	cfg        config.OIDC
+	publicURL  string
+	maxAge     time.Duration
+	secure     bool
+	provider   *oidc.Provider
+	verifier   *oidc.IDTokenVerifier
+	oauth      oauth2.Config
+	session    *sealer
+	flow       *sealer
+	endSess    string
+	store      *meta.Store
+	httpClient *http.Client
 }
 
 func New(ctx context.Context, cfg *config.Config, store *meta.Store) (*Authenticator, error) {
-	provider, err := oidc.NewProvider(ctx, cfg.OIDC.Issuer)
+	if err := validateOIDCEndpoint(cfg.OIDC.Issuer, cfg.AllowInsecureHTTP); err != nil {
+		return nil, fmt.Errorf("oidc issuer: %w", err)
+	}
+	client := &http.Client{
+		Transport: endpointGuardTransport{base: http.DefaultTransport, allowInsecure: cfg.AllowInsecureHTTP},
+		Timeout:   authHTTPTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("too many OIDC redirects")
+			}
+			if len(via) > 0 && via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme != "https" {
+				return errors.New("OIDC HTTPS redirect downgrade rejected")
+			}
+			return validateOIDCEndpoint(req.URL.String(), cfg.AllowInsecureHTTP)
+		},
+	}
+	initCtx, cancel := context.WithTimeout(ctx, authHTTPTimeout)
+	defer cancel()
+	initCtx = context.WithValue(initCtx, oauth2.HTTPClient, client)
+	provider, err := oidc.NewProvider(initCtx, cfg.OIDC.Issuer)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery: %w", err)
 	}
 	var md struct {
 		EndSession string `json:"end_session_endpoint"`
+		JWKSURI    string `json:"jwks_uri"`
+		UserInfo   string `json:"userinfo_endpoint"`
 	}
-	_ = provider.Claims(&md)
+	if err := provider.Claims(&md); err != nil {
+		return nil, fmt.Errorf("oidc discovery metadata: %w", err)
+	}
+	endpoint := provider.Endpoint()
+	for name, value := range map[string]string{
+		"authorization endpoint": endpoint.AuthURL,
+		"token endpoint":         endpoint.TokenURL,
+		"JWKS endpoint":          md.JWKSURI,
+		"userinfo endpoint":      md.UserInfo,
+		"end session endpoint":   md.EndSession,
+	} {
+		if value == "" && (name == "userinfo endpoint" || name == "end session endpoint") {
+			continue
+		}
+		if err := validateOIDCEndpoint(value, cfg.AllowInsecureHTTP); err != nil {
+			return nil, fmt.Errorf("oidc %s: %w", name, err)
+		}
+	}
 	a, err := newSessions(cfg, store)
 	if err != nil {
 		return nil, err
 	}
 	a.provider = provider
+	a.httpClient = client
 	a.verifier = provider.Verifier(&oidc.Config{ClientID: cfg.OIDC.ClientID})
 	a.oauth = oauth2.Config{
 		ClientID:     cfg.OIDC.ClientID,
 		ClientSecret: cfg.OIDC.ClientSecret,
-		Endpoint:     provider.Endpoint(),
+		Endpoint:     endpoint,
 		RedirectURL:  cfg.PublicURL + "/auth/callback",
 		Scopes:       cfg.OIDC.Scopes,
 	}
 	a.endSess = md.EndSession
 	return a, nil
+}
+
+type endpointGuardTransport struct {
+	base          http.RoundTripper
+	allowInsecure bool
+}
+
+func (t endpointGuardTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req == nil || req.URL == nil {
+		return nil, errors.New("invalid OIDC request URL")
+	}
+	if err := validateOIDCEndpoint(req.URL.String(), t.allowInsecure); err != nil {
+		return nil, fmt.Errorf("OIDC request URL rejected: %w", err)
+	}
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(req)
+}
+
+func validateOIDCEndpoint(raw string, allowInsecure bool) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "https" && u.Scheme != "http") {
+		return errors.New("must be an absolute HTTP(S) URL without credentials, query, or fragment")
+	}
+	if u.Scheme == "http" && !allowInsecure && !isLoopbackHost(u.Hostname()) {
+		return errors.New("must use HTTPS outside loopback")
+	}
+	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	return strings.EqualFold(host, "localhost") || (net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback())
 }
 
 // NewSessionsOnly returns an Authenticator that can read and issue session
@@ -94,20 +177,39 @@ func newSessions(cfg *config.Config, store *meta.Store) (*Authenticator, error) 
 		return nil, err
 	}
 	return &Authenticator{
-		cfg:       cfg.OIDC,
-		publicURL: cfg.PublicURL,
-		maxAge:    cfg.Session.MaxAge,
-		secure:    strings.HasPrefix(cfg.PublicURL, "https://"),
-		session:   sess,
-		flow:      flow,
-		store:     store,
+		cfg:        cfg.OIDC,
+		publicURL:  cfg.PublicURL,
+		maxAge:     cfg.Session.MaxAge,
+		secure:     strings.HasPrefix(cfg.PublicURL, "https://"),
+		session:    sess,
+		flow:       flow,
+		store:      store,
+		httpClient: &http.Client{Timeout: authHTTPTimeout},
 	}, nil
 }
 
 // SessionCookie returns the cookie for sess, as set after a login.
 func (a *Authenticator) SessionCookie(sess *Session) (*http.Cookie, error) {
-	v, err := a.session.seal(sess, a.maxAge)
+	return a.issueSessionCookie(context.Background(), sess, "", "", "")
+}
+
+func (a *Authenticator) issueSessionCookie(ctx context.Context, sess *Session, issuer, subject, oidcSID string) (*http.Cookie, error) {
+	if a.store == nil || sess == nil || sess.UserID == 0 {
+		return nil, errors.New("session store and user are required")
+	}
+	rawID := make([]byte, 32)
+	if _, err := rand.Read(rawID); err != nil {
+		return nil, err
+	}
+	sessCopy := *sess
+	sessCopy.SessionID = base64.RawURLEncoding.EncodeToString(rawID)
+	h := sha256.Sum256([]byte(sessCopy.SessionID))
+	if err := a.store.CreateSession(ctx, h[:], sessCopy.UserID, issuer, subject, oidcSID, a.maxAge); err != nil {
+		return nil, err
+	}
+	v, err := a.session.seal(&sessCopy, a.maxAge)
 	if err != nil {
+		_ = a.store.RevokeSession(context.Background(), h[:])
 		return nil, err
 	}
 	return &http.Cookie{Name: sessionCookie, Value: v}, nil
@@ -159,7 +261,9 @@ func (a *Authenticator) Login(w http.ResponseWriter, r *http.Request) {
 
 func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	ctx := r.Context()
+	ctx, cancel := context.WithTimeout(r.Context(), authHTTPTimeout)
+	defer cancel()
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, a.httpClient)
 	c, err := r.Cookie(flowCookie)
 	var fs flowState
 	if err != nil || a.flow.open(c.Value, &fs) != nil {
@@ -215,18 +319,36 @@ func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	v, err := a.session.seal(sess, a.maxAge)
+	var idClaims map[string]any
+	if err := idt.Claims(&idClaims); err != nil {
+		http.Error(w, "invalid claims", http.StatusUnauthorized)
+		return
+	}
+	cookie, err := a.issueSessionCookie(ctx, sess, idt.Issuer, idt.Subject, claimString(idClaims, "sid"))
 	if err != nil {
+		if errors.Is(err, meta.ErrSessionLimit) {
+			http.Error(w, "too many active sessions; sign out on another device", http.StatusTooManyRequests)
+			return
+		}
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	a.setCookie(w, sessionCookie, v, a.maxAge)
+	a.setCookie(w, sessionCookie, cookie.Value, a.maxAge)
 	slog.Info("login", "user", sess.Username)
 	http.Redirect(w, r, fs.Return, http.StatusFound)
 }
 
 func (a *Authenticator) Logout(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	if c, err := r.Cookie(sessionCookie); err == nil {
+		var sess Session
+		if a.session.open(c.Value, &sess) == nil && sess.SessionID != "" {
+			h := sha256.Sum256([]byte(sess.SessionID))
+			if err := a.store.RevokeSession(r.Context(), h[:]); err != nil {
+				slog.Warn("session revocation failed", "err", err)
+			}
+		}
+	}
 	a.setCookie(w, sessionCookie, "", -1)
 	if a.endSess == "" {
 		a.logoutRedirect(w, r, "/")
@@ -303,6 +425,11 @@ func (a *Authenticator) login(ctx context.Context, claims map[string]any) (*Sess
 	}
 	groups := claimStrings(claims, a.cfg.GroupsClaim)
 	if len(a.cfg.AllowedGroups) > 0 && !slices.ContainsFunc(groups, func(g string) bool { return slices.Contains(a.cfg.AllowedGroups, g) }) {
+		if u, err := a.store.UserBySub(ctx, sub); err == nil {
+			if err := a.store.RevokeUserCredentials(ctx, u.ID); err != nil {
+				slog.Warn("credential revocation after denied login failed", "user", u.Username, "err", err)
+			}
+		}
 		return nil, errors.New("you are not in a group that may use this server")
 	}
 	admin := a.cfg.IsAdmin(groups)
@@ -327,5 +454,80 @@ func (a *Authenticator) Current(r *http.Request) *Session {
 	if a.session.open(c.Value, &s) != nil {
 		return nil
 	}
+	if s.SessionID == "" || a.store == nil {
+		return nil
+	}
+	h := sha256.Sum256([]byte(s.SessionID))
+	valid, err := a.store.ValidSession(r.Context(), h[:], s.UserID)
+	if err != nil || !valid {
+		return nil
+	}
 	return &s
+}
+
+// BackchannelLogout validates and processes an OpenID Connect logout token.
+func (a *Authenticator) BackchannelLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/x-www-form-urlencoded" || r.URL.RawQuery != "" {
+		http.Error(w, "invalid logout request", http.StatusBadRequest)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid logout request", http.StatusBadRequest)
+		return
+	}
+	raw := r.Form.Get("logout_token")
+	if raw == "" || a.verifier == nil {
+		http.Error(w, "invalid logout token", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), authHTTPTimeout)
+	defer cancel()
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, a.httpClient)
+	idt, err := a.verifier.Verify(ctx, raw)
+	if err != nil {
+		http.Error(w, "invalid logout token", http.StatusUnauthorized)
+		return
+	}
+	var standard struct {
+		IssuedAt  int64           `json:"iat"`
+		ExpiresAt int64           `json:"exp"`
+		JTI       string          `json:"jti"`
+		Subject   string          `json:"sub"`
+		SID       string          `json:"sid"`
+		Nonce     json.RawMessage `json:"nonce"`
+	}
+	var events map[string]json.RawMessage
+	if err := idt.Claims(&standard); err != nil || idt.Claims(&struct {
+		Events *map[string]json.RawMessage `json:"events"`
+	}{Events: &events}) != nil || standard.Nonce != nil || (standard.Subject == "" && standard.SID == "") || standard.JTI == "" {
+		http.Error(w, "invalid logout token claims", http.StatusBadRequest)
+		return
+	}
+	var event map[string]json.RawMessage
+	if len(events[logoutEvent]) == 0 || json.Unmarshal(events[logoutEvent], &event) != nil || event == nil {
+		http.Error(w, "invalid logout token event", http.StatusBadRequest)
+		return
+	}
+	now := time.Now()
+	issued := time.Unix(standard.IssuedAt, 0)
+	if standard.IssuedAt == 0 || issued.After(now.Add(60*time.Second)) || now.Sub(issued) > 5*time.Minute || standard.ExpiresAt <= now.Unix() || standard.ExpiresAt <= standard.IssuedAt {
+		http.Error(w, "stale logout token", http.StatusUnauthorized)
+		return
+	}
+	replayUntil := time.Unix(standard.ExpiresAt, 0)
+	if cap := issued.Add(6 * time.Minute); replayUntil.After(cap) {
+		replayUntil = cap
+	}
+	if err := a.store.RevokeOIDCLogout(r.Context(), idt.Issuer, standard.JTI, standard.Subject, standard.SID, replayUntil); err != nil {
+		http.Error(w, "logout token rejected", http.StatusConflict)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }

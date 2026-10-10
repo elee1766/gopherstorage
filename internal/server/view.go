@@ -114,6 +114,10 @@ func (s *Server) handleView(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+	if u.Disabled {
+		http.NotFound(w, r)
+		return
+	}
 	doc, _, err := s.storage.ForUser(u).Get(ctx, docPath)
 	if errors.Is(err, rs.ErrNotFound) {
 		http.NotFound(w, r)
@@ -128,7 +132,7 @@ func (s *Server) handleView(w http.ResponseWriter, r *http.Request) {
 	name := rs.BaseName(docPath)
 	ct, kind := viewType(doc.Metadata.ContentType, name)
 	disp := "inline"
-	if kind == viewDownload || r.URL.Query().Has("download") {
+	if kind == viewDownload || r.URL.Query().Has("download") || s.sameOriginView(r) && (kind == viewSandbox || ct == "application/pdf") && !s.cfg.View.AllowSameOrigin {
 		disp = "attachment"
 	}
 	h.Set("Content-Type", ct)
@@ -168,8 +172,15 @@ func (s *Server) viewCacheControl() string {
 	return "public, no-cache"
 }
 
+// sameOriginView reports whether /view/ is served on the account hostname.
+// Comparing hosts conservatively also covers TLS-terminating reverse proxies.
+func (s *Server) sameOriginView(r *http.Request) bool {
+	public, err := url.Parse(s.cfg.PublicURL)
+	return err == nil && public.Host != "" && strings.EqualFold(r.Host, public.Host)
+}
+
 // viewHostOK enforces the dedicated view host, if one is configured, so
-// shared content is never served from the account origin.
+// shared content is never served from the account origin unless explicitly allowed.
 func (s *Server) viewHostOK(r *http.Request) bool {
 	vh := s.cfg.ViewHost()
 	return vh == "" || strings.EqualFold(r.Host, vh)

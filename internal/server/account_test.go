@@ -106,6 +106,10 @@ func TestAccountUIAndAPI(t *testing.T) {
 	if w := do(req{method: "POST", path: "/auth/logout", c: aliceC}); w.Code != http.StatusFound || w.Header().Get("Location") != "/" || !strings.Contains(w.Header().Get("Set-Cookie"), "gs_session=") {
 		t.Errorf("POST logout: %d, location %q, cookie %q", w.Code, w.Header().Get("Location"), w.Header().Get("Set-Cookie"))
 	}
+	if w := do(req{method: "GET", path: "/", c: aliceC}); w.Code != http.StatusOK || strings.Contains(w.Body.String(), "alice@storage.test") {
+		t.Errorf("copied cookie remained authenticated after logout: %d %s", w.Code, w.Body.String())
+	}
+	aliceC = cookie(alice)
 	if strings.Contains(body, `id="users"`) {
 		t.Error("non-admin sees the users section")
 	}
@@ -174,6 +178,13 @@ func TestAccountUIAndAPI(t *testing.T) {
 	}
 	if w, m := api("GET", "/api/v1/account", "", tok); w.Code != 200 || m["address"] != "alice@storage.test" || m["quota_bytes"] != float64(1<<30) {
 		t.Errorf("account: %d %v", w.Code, m)
+	}
+	lowercaseBearer := httptest.NewRequest("GET", "http://storage.test/api/v1/account", nil)
+	lowercaseBearer.Header.Set("Authorization", "bearer "+tok)
+	lowercaseResponse := httptest.NewRecorder()
+	h.ServeHTTP(lowercaseResponse, lowercaseBearer)
+	if lowercaseResponse.Code != http.StatusOK {
+		t.Errorf("lowercase bearer scheme: %d %s", lowercaseResponse.Code, lowercaseResponse.Body.String())
 	}
 	if w, m := api("GET", "/api/v1/tokens", "", tok); w.Code != 200 || len(m["tokens"].([]any)) != 1 || m["tokens"].([]any)[0].(map[string]any)["current"] != true {
 		t.Errorf("tokens: %d %v", w.Code, m)

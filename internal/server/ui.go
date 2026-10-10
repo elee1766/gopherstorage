@@ -13,6 +13,9 @@ import (
 
 	"github.com/a-h/templ"
 
+	"anime.bike/remotestorage/pkg/rs"
+	"anime.bike/remotestorage/pkg/rsserver"
+
 	"github.com/elee1766/gopherstorage/internal/auth"
 	"github.com/elee1766/gopherstorage/internal/meta"
 	"github.com/elee1766/gopherstorage/internal/ui"
@@ -31,9 +34,11 @@ const (
 func (s *Server) registerUI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("DELETE /ui/grants/{id}", s.uiHandler(false, s.uiRevokeGrant))
+	mux.HandleFunc("POST /ui/unpublish", s.uiHandler(false, s.uiUnpublish))
 	mux.HandleFunc("POST /ui/tokens", s.uiHandler(false, s.uiCreateToken))
 	mux.HandleFunc("DELETE /ui/tokens/{id}", s.uiHandler(false, s.uiDeleteToken))
 	mux.HandleFunc("PUT /ui/admin/users/{id}/quota", s.uiHandler(true, s.uiSetQuota))
+	mux.HandleFunc("PUT /ui/admin/users/{id}/access", s.uiHandler(true, s.uiSetUserAccess))
 	mux.Handle("GET /static/", http.StripPrefix("/static", ui.StaticHandler()))
 }
 
@@ -71,8 +76,8 @@ func (s *Server) uiHandler(adminOnly bool, h uiFunc) http.HandlerFunc {
 			flash(w, r, http.StatusUnauthorized, "Your account could not be loaded. Sign in again.")
 			return
 		}
-		if adminOnly && !u.IsAdmin {
-			flash(w, r, http.StatusForbidden, "Only admins can do that.")
+		if adminOnly && !isFreshAdmin(u) {
+			flash(w, r, http.StatusForbidden, "Sign in again to verify administrator access.")
 			return
 		}
 		h(w, r, sess, u)
@@ -110,7 +115,7 @@ func (s *Server) accountView(r *http.Request, sess *auth.Session) (*ui.Account, 
 	}
 	a := &ui.Account{
 		Username: u.Username, Name: sess.Name, Address: u.Username + "@" + s.cfg.Host(),
-		UsedBytes: u.UsedBytes, Quota: s.effectiveQuota(u), Documents: docs, Admin: u.IsAdmin,
+		UsedBytes: u.UsedBytes, Quota: s.effectiveQuota(u), Documents: docs, Admin: isFreshAdmin(u),
 	}
 	if a.Grants, err = s.uiGrants(r, u.ID); err != nil {
 		return nil, err
@@ -125,7 +130,7 @@ func (s *Server) accountView(r *http.Request, sess *auth.Session) (*ui.Account, 
 	if a.Tokens, err = s.uiTokens(r, u.ID); err != nil {
 		return nil, err
 	}
-	if u.IsAdmin {
+	if isFreshAdmin(u) {
 		if a.Users, err = s.uiUsers(r); err != nil {
 			return nil, err
 		}
@@ -155,7 +160,7 @@ func (s *Server) uiUsers(r *http.Request) (ui.Users, error) {
 	us, err := s.users(r)
 	out := ui.Users{DefaultQuota: s.cfg.Storage.DefaultQuotaBytes}
 	for _, u := range us {
-		out.List = append(out.List, ui.User{ID: u.ID, Username: u.Username, Admin: u.Admin, UsedBytes: u.UsedBytes, QuotaBytes: u.QuotaBytes, LastLogin: u.LastLogin})
+		out.List = append(out.List, ui.User{ID: u.ID, Username: u.Username, Admin: u.Admin, UsedBytes: u.UsedBytes, QuotaBytes: u.QuotaBytes, LastLogin: u.LastLogin, Disabled: u.Disabled})
 	}
 	return out, err
 }
@@ -167,6 +172,34 @@ func uiPathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+func (s *Server) uiUnpublish(w http.ResponseWriter, r *http.Request, _ *auth.Session, u *meta.User) {
+	publicPath, ok := canonicalPublicDocument(r.PostFormValue("path"))
+	if !ok {
+		flash(w, r, http.StatusBadRequest, "Choose a file under /public/ to unpublish.")
+		return
+	}
+	if _, err := s.storage.ForUser(u).Delete(r.Context(), publicPath, rsserver.Condition{}); err != nil {
+		if errors.Is(err, rs.ErrNotFound) {
+			flash(w, r, http.StatusNotFound, "The file was not found.")
+		} else {
+			slog.Error("unpublish", "user", u.Username, "path", publicPath, "err", err)
+			flash(w, r, http.StatusInternalServerError, "Could not unpublish the file.")
+		}
+		return
+	}
+	slog.Info("shared file unpublished", "user", u.Username, "path", publicPath, "via", "ui")
+	shared, err := s.shared(r, u, sharedOnPage)
+	if err != nil {
+		flash(w, r, http.StatusInternalServerError, "Could not load shared files.")
+		return
+	}
+	files := make([]ui.Shared, 0, len(shared))
+	for _, f := range shared {
+		files = append(files, ui.Shared(f))
+	}
+	render(w, r, http.StatusOK, ui.SharedSection(files))
 }
 
 func (s *Server) uiRevokeGrant(w http.ResponseWriter, r *http.Request, _ *auth.Session, u *meta.User) {
@@ -247,6 +280,38 @@ func (s *Server) uiDeleteToken(w http.ResponseWriter, r *http.Request, _ *auth.S
 	render(w, r, http.StatusOK, ui.TokensSection(t))
 }
 
+func (s *Server) uiSetUserAccess(w http.ResponseWriter, r *http.Request, _ *auth.Session, admin *meta.User) {
+	id, ok := uiPathID(w, r)
+	if !ok {
+		return
+	}
+	disabled, err := strconv.ParseBool(r.PostFormValue("disabled"))
+	if err != nil {
+		flash(w, r, http.StatusBadRequest, "Choose whether the account should be enabled or disabled.")
+		return
+	}
+	if id == admin.ID && disabled {
+		flash(w, r, http.StatusBadRequest, "You cannot disable your own administrator account.")
+		return
+	}
+	if err := s.store.SetUserDisabled(r.Context(), id, disabled); errors.Is(err, meta.ErrNotFound) {
+		flash(w, r, http.StatusNotFound, "No such user.")
+		return
+	} else if err != nil {
+		slog.Error("set user access", "admin", admin.Username, "user", id, "disabled", disabled, "err", err)
+		flash(w, r, http.StatusInternalServerError, "Could not update account access.")
+		return
+	}
+	target, err := s.store.UserByID(r.Context(), id)
+	if err != nil {
+		flash(w, r, http.StatusInternalServerError, "Could not load the user.")
+		return
+	}
+	slog.Info("user access updated", "admin", admin.Username, "user", id, "disabled", disabled)
+	render(w, r, http.StatusOK, ui.UserRow(ui.User{ID: target.ID, Username: target.Username, Admin: target.IsAdmin,
+		UsedBytes: target.UsedBytes, QuotaBytes: target.QuotaBytes, LastLogin: target.LastLogin, Disabled: target.Disabled}, s.cfg.Storage.DefaultQuotaBytes))
+}
+
 func (s *Server) uiSetQuota(w http.ResponseWriter, r *http.Request, _ *auth.Session, admin *meta.User) {
 	id, ok := uiPathID(w, r)
 	if !ok {
@@ -274,5 +339,5 @@ func (s *Server) uiSetQuota(w http.ResponseWriter, r *http.Request, _ *auth.Sess
 		return
 	}
 	render(w, r, http.StatusOK, ui.UserRow(ui.User{ID: target.ID, Username: target.Username, Admin: target.IsAdmin,
-		UsedBytes: target.UsedBytes, QuotaBytes: target.QuotaBytes, LastLogin: target.LastLogin}, s.cfg.Storage.DefaultQuotaBytes))
+		UsedBytes: target.UsedBytes, QuotaBytes: target.QuotaBytes, LastLogin: target.LastLogin, Disabled: target.Disabled}, s.cfg.Storage.DefaultQuotaBytes))
 }

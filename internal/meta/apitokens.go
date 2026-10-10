@@ -30,6 +30,13 @@ func (s *Store) CreateAPIToken(ctx context.Context, userID int64, name, token st
 	}
 	var id int64
 	err := s.write(ctx, func(tx *sql.Tx) error {
+		var disabled bool
+		if err := tx.QueryRowContext(ctx, `SELECT disabled FROM users WHERE id=?`, userID).Scan(&disabled); err != nil {
+			return err
+		}
+		if disabled {
+			return ErrNotFound
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM api_tokens WHERE user_id = ? AND expires_at > 0 AND expires_at <= ?`, userID, t); err != nil {
 			return err
 		}
@@ -41,7 +48,7 @@ func (s *Store) CreateAPIToken(ctx context.Context, userID int64, name, token st
 			return ErrTokenLimit
 		}
 		return tx.QueryRowContext(ctx, `INSERT INTO api_tokens (user_id, hash, name, created_at, expires_at)
-			VALUES (?, ?, ?, ?, ?) RETURNING id`, userID, hashToken(token), name, t, exp).Scan(&id)
+			SELECT id, ?, ?, ?, ? FROM users WHERE id=? AND disabled=0 RETURNING id`, hashToken(token), name, t, exp, userID).Scan(&id)
 	})
 	if err != nil {
 		return nil, err
@@ -74,7 +81,10 @@ func (s *Store) LookupAPIToken(ctx context.Context, token string) (*APIToken, *U
 		at.ExpiresAt = time.Unix(exp, 0)
 	}
 	u, err := s.UserByID(ctx, at.UserID)
-	if err != nil {
+	if err != nil || u.Disabled {
+		if err == nil {
+			err = ErrNotFound
+		}
 		return nil, nil, err
 	}
 	if now-used >= 60 {

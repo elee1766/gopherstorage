@@ -10,6 +10,14 @@ import (
 	"anime.bike/remotestorage/pkg/rs"
 )
 
+var ErrCredentialLimit = errors.New("credential limit reached")
+
+const (
+	MaxOAuthGrantsPerUser       = 100
+	MaxActiveCredentialsPerUser = 256
+	MaxPendingAuthCodesPerUser  = 32
+)
+
 // Grant is an app a user has authorized.
 type Grant struct {
 	ID         int64
@@ -30,10 +38,28 @@ func hashToken(token string) []byte {
 func (s *Store) UpsertGrant(ctx context.Context, userID int64, clientID, clientName, scope string) (int64, error) {
 	var id int64
 	err := s.write(ctx, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, `
-			INSERT INTO grants (user_id, client_id, client_name, scope, created_at) VALUES (?, ?, ?, ?, ?)
+		var existing bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM grants WHERE user_id=? AND client_id=?)`, userID, clientID).Scan(&existing); err != nil {
+			return err
+		}
+		if !existing {
+			var count int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM grants WHERE user_id=?`, userID).Scan(&count); err != nil {
+				return err
+			}
+			if count >= MaxOAuthGrantsPerUser {
+				return ErrCredentialLimit
+			}
+		}
+		err := tx.QueryRowContext(ctx, `
+			INSERT INTO grants (user_id, client_id, client_name, scope, created_at)
+			SELECT id, ?, ?, ?, ? FROM users WHERE id=? AND disabled=0
 			ON CONFLICT (user_id, client_id) DO UPDATE SET client_name = excluded.client_name, scope = excluded.scope
-			RETURNING id`, userID, clientID, clientName, scope, now()).Scan(&id)
+			RETURNING id`, clientID, clientName, scope, now(), userID).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
 	})
 	return id, err
 }
@@ -45,9 +71,34 @@ func (s *Store) IssueToken(ctx context.Context, grantID int64, token, scope stri
 		exp = time.Now().Add(ttl).Unix()
 	}
 	return s.write(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO tokens (hash, grant_id, scope, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`,
-			hashToken(token), grantID, scope, now(), exp)
-		return err
+		t := now()
+		if _, err := tx.ExecContext(ctx, `DELETE FROM tokens WHERE expires_at>0 AND expires_at<=? AND grant_id IN (SELECT id FROM grants WHERE user_id=(SELECT user_id FROM grants WHERE id=?))`, t, grantID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM auth_codes WHERE expires_at<=? AND grant_id IN (SELECT id FROM grants WHERE user_id=(SELECT user_id FROM grants WHERE id=?))`, t, grantID); err != nil {
+			return err
+		}
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE g.user_id=(SELECT user_id FROM grants WHERE id=?) AND (t.expires_at=0 OR t.expires_at>?)) + (SELECT COUNT(*) FROM auth_codes c JOIN grants g ON g.id=c.grant_id WHERE g.user_id=(SELECT user_id FROM grants WHERE id=?) AND c.expires_at>?)`, grantID, t, grantID, t).Scan(&count); err != nil {
+			return err
+		}
+		if count >= MaxActiveCredentialsPerUser {
+			return ErrCredentialLimit
+		}
+		res, err := tx.ExecContext(ctx, `INSERT INTO tokens (hash, grant_id, scope, created_at, expires_at)
+			SELECT ?, g.id, ?, ?, ? FROM grants g JOIN users u ON u.id=g.user_id WHERE g.id=? AND u.disabled=0`,
+			hashToken(token), scope, t, exp, grantID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+		return nil
 	})
 }
 
@@ -66,7 +117,7 @@ func (s *Store) LookupToken(ctx context.Context, token string) (*TokenInfo, erro
 	err := s.db.QueryRowContext(ctx, `
 		SELECT g.user_id, u.username, g.id, t.scope, t.expires_at
 		FROM tokens t JOIN grants g ON g.id = t.grant_id JOIN users u ON u.id = g.user_id
-		WHERE t.hash = ?`, hashToken(token)).Scan(&ti.UserID, &ti.Username, &ti.GrantID, &ti.Scope, &exp)
+		WHERE t.hash = ? AND u.disabled = 0`, hashToken(token)).Scan(&ti.UserID, &ti.Username, &ti.GrantID, &ti.Scope, &exp)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -148,9 +199,34 @@ type AuthCode struct {
 // SaveAuthCode stores a one-time authorization code.
 func (s *Store) SaveAuthCode(ctx context.Context, code string, c AuthCode, ttl time.Duration) error {
 	return s.write(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO auth_codes (hash, grant_id, redirect_uri, scope, code_challenge, expires_at)
-			VALUES (?, ?, ?, ?, ?, ?)`, hashToken(code), c.GrantID, c.RedirectURI, c.Scope, c.CodeChallenge, time.Now().Add(ttl).Unix())
-		return err
+		t := now()
+		if _, err := tx.ExecContext(ctx, `DELETE FROM auth_codes WHERE expires_at<=? AND grant_id IN (SELECT id FROM grants WHERE user_id=(SELECT user_id FROM grants WHERE id=?))`, t, c.GrantID); err != nil {
+			return err
+		}
+		var total, pending int
+		if err := tx.QueryRowContext(ctx, `SELECT
+			(SELECT COUNT(*) FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE g.user_id=(SELECT user_id FROM grants WHERE id=?) AND (t.expires_at=0 OR t.expires_at>?)) +
+			(SELECT COUNT(*) FROM auth_codes c JOIN grants g ON g.id=c.grant_id WHERE g.user_id=(SELECT user_id FROM grants WHERE id=?) AND c.expires_at>?),
+			(SELECT COUNT(*) FROM auth_codes c JOIN grants g ON g.id=c.grant_id WHERE g.user_id=(SELECT user_id FROM grants WHERE id=?) AND c.expires_at>?)`, c.GrantID, t, c.GrantID, t, c.GrantID, t).Scan(&total, &pending); err != nil {
+			return err
+		}
+		if total >= MaxActiveCredentialsPerUser || pending >= MaxPendingAuthCodesPerUser {
+			return ErrCredentialLimit
+		}
+		res, err := tx.ExecContext(ctx, `INSERT INTO auth_codes (hash, grant_id, redirect_uri, scope, code_challenge, expires_at)
+			SELECT ?, g.id, ?, ?, ?, ? FROM grants g JOIN users u ON u.id=g.user_id WHERE g.id=? AND u.disabled=0`,
+			hashToken(code), c.RedirectURI, c.Scope, c.CodeChallenge, time.Now().Add(ttl).Unix(), c.GrantID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+		return nil
 	})
 }
 
@@ -181,7 +257,7 @@ func (s *Store) RedeemAuthCode(ctx context.Context, code string) (*AuthCode, err
 
 // GrantUser returns the user id and client id of a grant.
 func (s *Store) GrantUser(ctx context.Context, grantID int64) (userID int64, clientID string, err error) {
-	err = s.db.QueryRowContext(ctx, `SELECT user_id, client_id FROM grants WHERE id = ?`, grantID).Scan(&userID, &clientID)
+	err = s.db.QueryRowContext(ctx, `SELECT g.user_id, g.client_id FROM grants g JOIN users u ON u.id=g.user_id WHERE g.id = ? AND u.disabled=0`, grantID).Scan(&userID, &clientID)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = ErrNotFound
 	}
@@ -198,7 +274,13 @@ func (s *Store) PruneExpired(ctx context.Context) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM api_tokens WHERE expires_at > 0 AND expires_at <= ?`, t); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `DELETE FROM auth_codes WHERE expires_at <= ?`, t)
+		if _, err := tx.ExecContext(ctx, `DELETE FROM auth_codes WHERE expires_at <= ?`, t); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= ?`, t); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `DELETE FROM logout_replays WHERE expires_at <= ?`, t)
 		return err
 	})
 }

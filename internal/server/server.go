@@ -89,6 +89,9 @@ func (s *Server) storageFor(ctx context.Context, _ *rsserver.AuthInfo, req *rsse
 	if err != nil {
 		return nil, err
 	}
+	if u.Disabled {
+		return emptyStorage{}, nil
+	}
 	return s.storage.ForUser(u), nil
 }
 
@@ -105,10 +108,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /auth/login", s.auth.Login)
 	mux.HandleFunc("GET /auth/callback", s.auth.Callback)
 	mux.HandleFunc("POST /auth/logout", s.auth.Logout)
+	mux.HandleFunc("POST /auth/backchannel-logout", s.auth.BackchannelLogout)
 	s.registerAPI(mux)
 	s.registerUI(mux)
 
-	return logRequests(s.protectUI(s.routeStorage(mux)))
+	return s.requestBoundary(logRequests(s.protectUI(s.routeStorage(mux))))
 }
 
 // routeStorage sends /storage/ and /view/ requests straight to their handlers.
@@ -140,12 +144,15 @@ func (s *Server) protectUI(next http.Handler) http.Handler {
 	cop.AddInsecureBypassPattern(StoragePrefix)
 	cop.AddInsecureBypassPattern("/oauth/token")
 	cop.AddInsecureBypassPattern("/.well-known/webfinger")
+	cop.AddInsecureBypassPattern("/auth/backchannel-logout")
 	return cop.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, StoragePrefix) && !strings.HasPrefix(r.URL.Path, ViewPrefix) {
 			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		if !strings.HasPrefix(r.URL.Path, StoragePrefix) && !strings.HasPrefix(r.URL.Path, ViewPrefix) {
+		if r.URL.Path == "/auth/callback" {
+			w.Header().Set("Referrer-Policy", "no-referrer")
+		} else if !strings.HasPrefix(r.URL.Path, StoragePrefix) && !strings.HasPrefix(r.URL.Path, ViewPrefix) {
 			w.Header().Set("Referrer-Policy", "same-origin")
 		}
 		next.ServeHTTP(w, r)
@@ -159,10 +166,13 @@ func (s *Server) webfinger() http.Handler {
 		if !auth.ValidUsername(user) {
 			return nil, nil
 		}
-		if _, err := s.store.UserByName(context.Background(), user); errors.Is(err, meta.ErrNotFound) {
+		u, err := s.store.UserByName(context.Background(), user)
+		if errors.Is(err, meta.ErrNotFound) {
 			return nil, nil
 		} else if err != nil {
 			return nil, err
+		} else if u.Disabled {
+			return nil, nil
 		}
 		return &webfinger.UserStorageInfo{
 			StorageRoot:         s.cfg.PublicURL + StoragePrefix + user,

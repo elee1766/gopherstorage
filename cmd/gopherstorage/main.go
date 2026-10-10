@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/elee1766/gopherstorage/internal/auth"
+	"github.com/elee1766/gopherstorage/internal/backup"
 	"github.com/elee1766/gopherstorage/internal/blob"
 	"github.com/elee1766/gopherstorage/internal/config"
 	"github.com/elee1766/gopherstorage/internal/meta"
@@ -36,7 +37,15 @@ const uploadGrace = 24 * time.Hour
 func run() error {
 	cfgPath := flag.String("config", envOr("GOPHERSTORAGE_CONFIG", "config.yaml"), "path to config file")
 	check := flag.Bool("check", false, "validate the config and exit")
+	backupDest := flag.String("backup", "", "create an offline snapshot in a new destination directory")
+	includeCredentials := flag.Bool("include-credentials", false, "retain credentials in a backup, allowing them to be restored")
 	flag.Parse()
+	if *includeCredentials && *backupDest == "" {
+		return errors.New("-include-credentials requires -backup")
+	}
+	if *check && *backupDest != "" {
+		return errors.New("-check and -backup cannot be combined")
+	}
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
@@ -49,8 +58,22 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if *backupDest != "" {
+		return runBackup(ctx, cfg, *backupDest, *includeCredentials)
+	}
 	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
+		return fmt.Errorf("create data directory: %w", err)
+	}
+	if err := os.Chmod(cfg.DataDir, 0o700); err != nil {
+		return fmt.Errorf("protect data directory: %w", err)
+	}
+	unlock, err := backup.AcquireDataDirLock(cfg.DataDir)
+	if err != nil {
+		return fmt.Errorf("lock data directory: %w", err)
+	}
+	defer unlock()
 
 	store, err := meta.Open(initCtx, filepath.Join(cfg.DataDir, "meta.db"))
 	if err != nil {
@@ -62,14 +85,21 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("open blob storage: %w", err)
 	}
-	svc := &storage.Service{Meta: store, Blobs: blobs, DefaultQuota: cfg.Storage.DefaultQuotaBytes}
+	svc := &storage.Service{
+		Meta: store, Blobs: blobs, DefaultQuota: cfg.Storage.DefaultQuotaBytes,
+		MaxDocumentBytes: cfg.Storage.MaxDocumentBytes,
+		MaxConcurrentUploads: cfg.Storage.MaxConcurrentUploads,
+		MaxStagingBytes: cfg.Storage.MaxStagingBytes,
+		MaxNodes: cfg.Storage.MaxNodes,
+		MaxFolderChildren: cfg.Storage.MaxFolderChildren,
+	}
 
 	a, err := auth.New(initCtx, cfg, store)
 	if err != nil {
 		return err
 	}
 	csrf := sha256.Sum256([]byte("gopherstorage/consent\x00" + cfg.Session.Secret))
-	o := &oauth.Server{Auth: a, Store: store, TokenTTL: cfg.Tokens.TTL, CSRFKey: csrf[:]}
+	o := &oauth.Server{Auth: a, Store: store, TokenTTL: cfg.Tokens.TTL, AllowImplicit: cfg.Tokens.AllowImplicit, CSRFKey: csrf[:]}
 	srv := server.New(cfg, store, svc, a, o)
 
 	go maintenance(ctx, svc, store)
@@ -79,7 +109,9 @@ func run() error {
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       5 * time.Minute,
+		WriteTimeout:      5 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    32 << 10,
 	}
 	errc := make(chan error, 1)
 	go func() {
@@ -119,14 +151,25 @@ func maintenance(ctx context.Context, svc *storage.Service, store *meta.Store) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	for {
-		if n, err := svc.CollectGarbage(ctx, uploadGrace); err != nil {
+		cycleCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		if cleanup, ok := svc.Blobs.(interface {
+			CleanupTemporary(context.Context, time.Duration) (int, error)
+		}); ok {
+			if n, err := cleanup.CleanupTemporary(cycleCtx, uploadGrace); err != nil {
+				slog.Warn("temporary blob gc", "err", err)
+			} else if n > 0 {
+				slog.Info("temporary blob gc", "deleted", n)
+			}
+		}
+		if n, err := svc.CollectGarbage(cycleCtx, uploadGrace); err != nil {
 			slog.Warn("blob gc", "err", err)
 		} else if n > 0 {
 			slog.Info("blob gc", "deleted", n)
 		}
-		if err := store.PruneExpired(ctx); err != nil {
+		if err := store.PruneExpired(cycleCtx); err != nil {
 			slog.Warn("token prune", "err", err)
 		}
+		cancel()
 		select {
 		case <-ctx.Done():
 			return

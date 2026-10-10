@@ -10,6 +10,8 @@ import (
 	"hash"
 	"io"
 	"log/slog"
+	"net/http"
+	"strings"
 	"time"
 
 	"anime.bike/remotestorage/pkg/rs"
@@ -25,6 +27,40 @@ type Service struct {
 	Blobs blob.Store
 	// DefaultQuota applies to users without their own quota. 0 = unlimited.
 	DefaultQuota int64
+	// MaxDocumentBytes limits one document. 0 = unlimited.
+	MaxDocumentBytes int64
+	// MaxConcurrentUploads limits in-flight uploads per user. 0 uses the safe default.
+	MaxConcurrentUploads int
+	// MaxStagingBytes limits aggregate in-flight bytes. 0 uses the safe default.
+	MaxStagingBytes int64
+	// MaxNodes limits documents and folders per user. 0 uses the safe default.
+	MaxNodes int64
+	// MaxFolderChildren limits the size of a folder listing. 0 uses the safe default.
+	MaxFolderChildren int
+}
+
+const (
+	defaultConcurrentUploads = 8
+	defaultStagingBytes      = 2 << 30
+	defaultMaxNodes          = 100_000
+	defaultFolderChildren    = 10_000
+)
+
+func (s *Service) uploadLimits() (int, int64, int64, int) {
+	slots, staging, nodes, children := s.MaxConcurrentUploads, s.MaxStagingBytes, s.MaxNodes, s.MaxFolderChildren
+	if slots <= 0 {
+		slots = defaultConcurrentUploads
+	}
+	if staging <= 0 {
+		staging = defaultStagingBytes
+	}
+	if nodes <= 0 {
+		nodes = defaultMaxNodes
+	}
+	if children <= 0 {
+		children = defaultFolderChildren
+	}
+	return slots, staging, nodes, children
 }
 
 // ForUser returns the backend of a user.
@@ -59,7 +95,8 @@ func (u *userStorage) Head(ctx context.Context, p string) (*rs.Metadata, error) 
 
 func (u *userStorage) Get(ctx context.Context, p string) (*rs.Document, *rs.FolderListing, error) {
 	if rs.IsFolderPath(p) {
-		folder, children, err := u.svc.Meta.ListFolder(ctx, u.userID, p)
+		_, _, _, maxChildren := u.svc.uploadLimits()
+		folder, children, err := u.svc.Meta.ListFolderLimit(ctx, u.userID, p, maxChildren)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -98,6 +135,7 @@ type countingHasher struct {
 	max      int64
 	limited  bool
 	exceeded bool
+	limitErr error
 }
 
 func (c *countingHasher) Read(p []byte) (int, error) {
@@ -111,7 +149,10 @@ func (c *countingHasher) Read(p []byte) (int, error) {
 			n, err := c.r.Read(extra[:])
 			if n > 0 {
 				c.exceeded = true
-				return 0, rs.ErrQuotaExceeded
+				if c.limitErr != nil {
+					return 0, c.limitErr
+				}
+				return 0, rs.ErrTooLarge
 			}
 			return 0, err
 		}
@@ -126,6 +167,12 @@ func (c *countingHasher) Read(p []byte) (int, error) {
 }
 
 func (u *userStorage) Put(ctx context.Context, p string, body io.Reader, size int64, contentType string, cond rsserver.Condition) (*rsserver.PutResult, error) {
+	if len(p) > 4096 || strings.Count(p, "/") > 65 {
+		return nil, rs.ErrTooLarge
+	}
+	if u.svc.MaxDocumentBytes > 0 && size >= 0 && size > u.svc.MaxDocumentBytes {
+		return nil, rs.ErrTooLarge
+	}
 	// Fail fast before uploading. The real checks run again atomically in PutDocument.
 	var oldSize int64
 	if cur, err := u.svc.Meta.GetNode(ctx, u.userID, p); err == nil && !cur.IsFolder {
@@ -140,33 +187,53 @@ func (u *userStorage) Put(ctx context.Context, p string, body io.Reader, size in
 	} else if err != nil {
 		return nil, err
 	}
-	var maxBytes int64
-	limited := u.quota > 0
-	if limited {
-		_, used, err := u.svc.Meta.Usage(ctx, u.userID)
-		if err != nil {
-			return nil, err
+	slots, staging, maxNodes, maxChildren := u.svc.uploadLimits()
+	reserveBytes := size
+	clamp := size < 0
+	limitErr := error(rs.ErrTooLarge)
+	if clamp {
+		reserveBytes = staging
+		limitErr = meta.ErrUploadCapacity
+		if u.svc.MaxDocumentBytes > 0 && reserveBytes >= u.svc.MaxDocumentBytes {
+			reserveBytes = u.svc.MaxDocumentBytes
+			limitErr = rs.ErrTooLarge
 		}
-		maxBytes = oldSize
-		if used < u.quota {
+		if u.quota > 0 {
+			_, used, err := u.svc.Meta.Usage(ctx, u.userID)
+			if err != nil {
+				return nil, err
+			}
 			available := u.quota - used
+			if available < 0 {
+				available = 0
+			}
 			const maxInt64 = int64(^uint64(0) >> 1)
-			if oldSize > maxInt64-available {
-				maxBytes = maxInt64
+			quotaAllowance := available
+			if oldSize > maxInt64-quotaAllowance {
+				quotaAllowance = maxInt64
 			} else {
-				maxBytes = oldSize + available
+				quotaAllowance += oldSize
+			}
+			if reserveBytes > quotaAllowance {
+				reserveBytes = quotaAllowance
+				limitErr = rs.ErrQuotaExceeded
 			}
 		}
-		if size >= 0 && size > maxBytes {
-			return nil, rs.ErrQuotaExceeded
-		}
+	} else if u.svc.MaxDocumentBytes > 0 && reserveBytes > u.svc.MaxDocumentBytes {
+		return nil, rs.ErrTooLarge
 	}
-
 	key := meta.NewBlobKey()
-	if err := u.svc.Meta.AddPendingBlob(ctx, key); err != nil {
+	reserved, err := u.svc.Meta.ReserveUpload(ctx, u.userID, p, key, reserveBytes, u.quota, slots, staging, maxChildren, clamp)
+	if err != nil {
+		if errors.Is(err, meta.ErrAccountDisabled) {
+			return nil, rsserver.NewHTTPError(http.StatusForbidden, "Account is disabled")
+		}
 		return nil, err
 	}
-	ch := &countingHasher{r: body, h: sha256.New(), max: maxBytes, limited: limited}
+	if reserved < reserveBytes {
+		limitErr = rs.ErrQuotaExceeded
+	}
+	ch := &countingHasher{r: body, h: sha256.New(), max: reserved, limited: true, limitErr: limitErr}
 	if err := u.svc.Blobs.Put(ctx, key, ch, size); err != nil {
 		u.dropBlob(key)
 		if errors.Is(err, blob.ErrTooLarge) {
@@ -178,7 +245,7 @@ func (u *userStorage) Put(ctx context.Context, p string, body io.Reader, size in
 	// one-byte overflow probe observes the reader error. Do not commit that blob.
 	if ch.exceeded {
 		u.dropBlob(key)
-		return nil, rs.ErrQuotaExceeded
+		return nil, limitErr
 	}
 	if size >= 0 && ch.n != size {
 		u.dropBlob(key)
@@ -187,10 +254,13 @@ func (u *userStorage) Put(ctx context.Context, p string, body io.Reader, size in
 	sum := ch.h.Sum(nil)
 	res, err := u.svc.Meta.PutDocument(ctx, meta.PutDocument{
 		UserID: u.userID, Path: p, ContentType: contentType, Size: ch.n,
-		BlobKey: key, ETag: hex.EncodeToString(sum[:16]), Cond: cond, Quota: u.quota,
+		BlobKey: key, ETag: hex.EncodeToString(sum[:16]), Cond: cond, Quota: u.quota, MaxNodes: maxNodes, MaxFolderChildren: maxChildren,
 	})
 	if err != nil {
 		u.dropBlob(key)
+		if errors.Is(err, meta.ErrAccountDisabled) {
+			return nil, rsserver.NewHTTPError(http.StatusForbidden, "Account is disabled")
+		}
 		return nil, err
 	}
 	if res.OldBlobKey != "" {
@@ -214,6 +284,14 @@ func (u *userStorage) Delete(ctx context.Context, p string, cond rsserver.Condit
 func (u *userStorage) dropBlob(key string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	if cleanup, ok := u.svc.Blobs.(interface {
+		AbortIncomplete(context.Context, string) error
+	}); ok {
+		if err := cleanup.AbortIncomplete(ctx, key); err != nil {
+			slog.Warn("incomplete blob cleanup failed, will retry", "key", key, "err", err)
+			return
+		}
+	}
 	if err := u.svc.Blobs.Delete(ctx, key); err != nil {
 		slog.Warn("blob delete failed, will retry", "key", key, "err", err)
 		return
@@ -233,6 +311,13 @@ func (s *Service) CollectGarbage(ctx context.Context, uploadGrace time.Duration)
 			return total, err
 		}
 		for _, b := range batch {
+			if cleanup, ok := s.Blobs.(interface {
+				AbortIncomplete(context.Context, string) error
+			}); ok {
+				if err := cleanup.AbortIncomplete(ctx, b.Key); err != nil {
+					return total, err
+				}
+			}
 			if err := s.Blobs.Delete(ctx, b.Key); err != nil {
 				return total, err
 			}

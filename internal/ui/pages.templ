@@ -151,7 +151,7 @@ templ AppsSection(grants []Grant) {
 templ SharedSection(files []Shared) {
 	<section id="shared">
 		<h2>Shared files</h2>
-		<p class="dim">Documents that apps put in your <code>public</code> folder. Anyone with the link can open them.</p>
+		<p class="dim">Documents that apps put in your <code>public</code> folder. Anyone with the link can open them. Unpublishing removes the server copy and link access, but cannot remove copies others have already downloaded.</p>
 		if len(files) == 0 {
 			<p class="dim">Nothing shared yet.</p>
 		} else {
@@ -166,7 +166,13 @@ templ SharedSection(files []Shared) {
 							</td>
 							<td class="num">{ Size(f.Size) }</td>
 							<td>@timestamp(f.Modified)</td>
-							<td class="ops">@copyButton("Copy link", f.URL)</td>
+							<td class="ops">
+									@copyButton("Copy link", f.URL)
+									<form class="inline" hx-post="/ui/unpublish" hx-target="#shared" hx-swap="outerHTML" hx-confirm={ "Unpublish " + f.Path + "? This deletes the server copy and stops this link from working. It cannot remove copies already downloaded." }>
+										<input type="hidden" name="path" value={ f.Path }/>
+										<button type="submit" class="small danger">Unpublish</button>
+									</form>
+								</td>
 						</tr>
 					}
 				</tbody>
@@ -237,7 +243,7 @@ templ UsersSection(u Users) {
 	<section id="users">
 		<h2>Users</h2>
 		<table>
-			<thead><tr><th>User</th><th class="num">Used</th><th class="num">Quota</th><th>Last login</th><th></th></tr></thead>
+			<thead><tr><th>User</th><th>Status</th><th class="num">Used</th><th class="num">Quota</th><th>Last login</th><th></th></tr></thead>
 			<tbody>
 				for _, x := range u.List {
 					@UserRow(x, u.DefaultQuota)
@@ -255,7 +261,14 @@ templ UserRow(x User, defaultQuota int64) {
 				<span class="badge">admin</span>
 			}
 		</td>
-		<td class="num">{ Size(x.UsedBytes) }</td>
+		<td>
+				if x.Disabled {
+					<span class="badge">disabled</span>
+				} else {
+					<span class="dim">enabled</span>
+				}
+			</td>
+			<td class="num">{ Size(x.UsedBytes) }</td>
 		<td class="num">
 			if x.QuotaBytes != 0 {
 				{ Size(x.QuotaBytes) }
@@ -267,7 +280,18 @@ templ UserRow(x User, defaultQuota int64) {
 		</td>
 		<td>@timestamp(x.LastLogin)</td>
 		<td class="ops">
-			<button type="button" class="small" x-show="!open" x-on:click="toggle">Set quota</button>
+			if x.Disabled {
+					<form class="inline" hx-put={ fmt.Sprintf("/ui/admin/users/%d/access", x.ID) } hx-target="closest tr" hx-swap="outerHTML" hx-confirm={ "Re-enable " + x.Username + "? They must sign in again. Their previous sessions, apps, and API tokens were revoked." }>
+						<input type="hidden" name="disabled" value="false"/>
+						<button type="submit" class="small primary">Enable</button>
+					</form>
+				} else {
+					<form class="inline" hx-put={ fmt.Sprintf("/ui/admin/users/%d/access", x.ID) } hx-target="closest tr" hx-swap="outerHTML" hx-confirm={ "Disable " + x.Username + "? This revokes their sessions, app credentials, and API tokens." }>
+						<input type="hidden" name="disabled" value="true"/>
+						<button type="submit" class="small danger">Disable</button>
+					</form>
+				}
+				<button type="button" class="small" x-show="!open" x-on:click="toggle">Set quota</button>
 			<form
 				class="inline"
 				x-show="open"
@@ -305,6 +329,8 @@ templ ConsentPage(c Consent) {
 		<main class="narrow">
 			<h1>Allow access to your storage?</h1>
 			<p><strong>{ c.Client }</strong> wants to access the storage of <strong>{ c.User }</strong>.</p>
+			<p class="warn">This origin is supplied by the app and is not a verified publisher identity. Public information shown here may be copied and retained by others.</p>
+			<p class="dim">Approving may update this app's grant. Credentials already issued keep their existing access until you revoke the app on your account page.</p>
 			if c.Insecure {
 				<p class="warn">This app is served over plain http.</p>
 			}

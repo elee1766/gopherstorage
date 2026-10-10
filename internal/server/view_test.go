@@ -39,6 +39,7 @@ func TestView(t *testing.T) {
 	put("/public/photos/cat.png", "image/png", "\x89PNG fake")
 	put("/public/clip.mp4", "application/octet-stream", "0123456789")
 	put("/public/page.html", "text/html", "<script>alert(1)</script>")
+	put("/public/doc.pdf", "application/pdf", "%PDF fake")
 	put("/public/notes.txt", "text/plain", "hi")
 	put("/public/archive.zip", "application/zip", "PK")
 	put("/public/a b ü.jpg", "image/jpeg", "jpg")
@@ -48,7 +49,7 @@ func TestView(t *testing.T) {
 	s := &Server{cfg: cfg, store: store, storage: svc}
 
 	do := func(method, target string, hdr ...string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(method, target, nil)
+		req := httptest.NewRequest(method, "http://storage.test"+target, nil)
 		for i := 0; i+1 < len(hdr); i += 2 {
 			req.Header.Set(hdr[i], hdr[i+1])
 		}
@@ -65,8 +66,9 @@ func TestView(t *testing.T) {
 		{"/view/alice/photos/cat.png", 200, "image/png", `inline; filename=cat.png`, "default-src 'none'"},
 		// Generic stored type falls back to the extension; video stays inline.
 		{"/view/alice/clip.mp4", 200, "video/mp4", `inline; filename=clip.mp4`, "media-src 'self'"},
-		// Active content is shown, but sandboxed.
-		{"/view/alice/page.html", 200, "text/html", `inline; filename=page.html`, "sandbox"},
+		// Active content and PDF default to download on the account origin.
+		{"/view/alice/page.html", 200, "text/html", `attachment; filename=page.html`, "sandbox"},
+		{"/view/alice/doc.pdf", 200, "application/pdf", `attachment; filename=doc.pdf`, "sandbox"},
 		{"/view/alice/notes.txt", 200, "text/plain; charset=utf-8", "inline", ""},
 		// Unknown types download.
 		{"/view/alice/archive.zip", 200, "application/zip", `attachment; filename=archive.zip`, "sandbox"},
@@ -130,6 +132,18 @@ func TestView(t *testing.T) {
 		t.Errorf("PUT: %d", w.Code)
 	}
 
+	// A TLS-terminating proxy still presents the account hostname internally.
+	s.cfg = &config.Config{PublicURL: "https://storage.test"}
+	if w := do("GET", "/view/alice/page.html"); w.Code != 200 || !strings.HasPrefix(w.Header().Get("Content-Disposition"), "attachment") {
+		t.Errorf("reverse-proxy same-host default: %d disposition=%q", w.Code, w.Header().Get("Content-Disposition"))
+	}
+
+	// Explicit same-origin opt-in may render active content, but remains sandboxed.
+	s.cfg = &config.Config{PublicURL: "http://storage.test", View: config.View{AllowSameOrigin: true}}
+	if w := do("GET", "/view/alice/page.html"); w.Code != 200 || !strings.HasPrefix(w.Header().Get("Content-Disposition"), "inline") || !strings.Contains(w.Header().Get("Content-Security-Policy"), "sandbox") {
+		t.Errorf("same-origin opt-in: %d disposition=%q csp=%q", w.Code, w.Header().Get("Content-Disposition"), w.Header().Get("Content-Security-Policy"))
+	}
+
 	// With a separate view host, /view/ only answers there, and that host
 	// serves nothing else.
 	s.cfg = &config.Config{PublicURL: "http://storage.test", View: config.View{URL: "http://share.test"}}
@@ -150,5 +164,20 @@ func TestView(t *testing.T) {
 	}
 	if got := s.ViewURL("alice", "/public/a b.png"); got != "http://share.test/view/alice/a%20b.png" {
 		t.Errorf("ViewURL %q", got)
+	}
+
+	// Account offboarding hides public documents without deleting them.
+	s.cfg = &config.Config{PublicURL: "http://storage.test"}
+	if err := store.SetUserDisabled(ctx, u.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if w := do("GET", "/view/alice/notes.txt"); w.Code != http.StatusNotFound {
+		t.Errorf("disabled account public view: %d", w.Code)
+	}
+	if err := store.SetUserDisabled(ctx, u.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if w := do("GET", "/view/alice/notes.txt"); w.Code != http.StatusOK {
+		t.Errorf("re-enabled account public view: %d", w.Code)
 	}
 }

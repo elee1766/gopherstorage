@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -43,16 +45,39 @@ const (
 	// A 64 MiB cap keeps a 10,000-part object within 625 GiB and bounds buffers.
 	maxPartSize = 64 << 20
 	maxParts    = 10000
+
+	s3OperationTimeout = 5 * time.Minute
+	s3StartupTimeout   = 30 * time.Second
+	s3DialTimeout      = 10 * time.Second
+	s3HeaderTimeout    = 15 * time.Second
 )
 
 const maxObjectSize = int64(maxPartSize) * maxParts
 
 func NewS3(ctx context.Context, o S3Options) (*S3, error) {
+	ctx, cancel := context.WithTimeout(ctx, s3StartupTimeout)
+	defer cancel()
 	region := o.Region
 	if region == "" {
 		region = "us-east-1"
 	}
-	loadOpts := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion(region)}
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: s3DialTimeout, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   s3DialTimeout,
+		ResponseHeaderTimeout: s3HeaderTimeout,
+		ExpectContinueTimeout: time.Second,
+	}
+	loadOpts := []func(*awsconfig.LoadOptions) error{
+		awsconfig.WithRegion(region),
+		awsconfig.WithHTTPClient(&http.Client{Transport: transport}),
+		awsconfig.WithRetryer(func() aws.Retryer {
+			return retry.NewStandard(func(o *retry.StandardOptions) { o.MaxAttempts = 3 })
+		}),
+	}
 	if o.AccessKey != "" {
 		loadOpts = append(loadOpts, awsconfig.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(o.AccessKey, o.SecretKey, o.SessionToken)))
@@ -85,6 +110,13 @@ func NewS3(ctx context.Context, o S3Options) (*S3, error) {
 		}
 		return nil, fmt.Errorf("check bucket %q: %w", o.Bucket, err)
 	}
+	if s.prefix != "" {
+		if _, err := c.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{
+			Bucket: s.bucket, Prefix: aws.String(s.prefix + "/"), MaxUploads: aws.Int32(1),
+		}); err != nil {
+			return nil, fmt.Errorf("check multipart-list permission for S3 prefix %q: %w", s.prefix, err)
+		}
+	}
 	return s, nil
 }
 
@@ -108,6 +140,8 @@ func (s *S3) key(k string) *string {
 // Put buffers one part at a time. Bodies under one part use a single
 // PutObject; larger ones use a multipart upload.
 func (s *S3) Put(ctx context.Context, k string, r io.Reader, size int64) error {
+	ctx, cancel := context.WithTimeout(ctx, s3OperationTimeout)
+	defer cancel()
 	if !validKey(k) {
 		return errBadKey
 	}
@@ -202,10 +236,13 @@ func (s *S3) Open(ctx context.Context, k string, size int64) (io.ReadSeekCloser,
 	if !validKey(k) {
 		return nil, errBadKey
 	}
-	return &s3Reader{ctx: ctx, s: s, key: s.key(k), size: size}, nil
+	readCtx, cancel := context.WithTimeout(ctx, s3OperationTimeout)
+	return &s3Reader{ctx: readCtx, cancel: cancel, s: s, key: s.key(k), size: size}, nil
 }
 
 func (s *S3) Delete(ctx context.Context, k string) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	if !validKey(k) {
 		return errBadKey
 	}
@@ -216,15 +253,59 @@ func (s *S3) Delete(ctx context.Context, k string) error {
 	return nil
 }
 
+// AbortIncomplete aborts multipart uploads for this application's exact blob key.
+// The caller must keep the corresponding pending-blob record until this succeeds.
+func (s *S3) AbortIncomplete(ctx context.Context, k string) error {
+	if !validKey(k) {
+		return errBadKey
+	}
+	ctx, cancel := context.WithTimeout(ctx, s3OperationTimeout)
+	defer cancel()
+	key := aws.ToString(s.key(k))
+	var keyMarker, uploadMarker *string
+	for pages := 0; ; pages++ {
+		if pages >= 100 {
+			return errors.New("too many multipart uploads for blob key")
+		}
+		out, err := s.c.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{
+			Bucket: s.bucket, Prefix: aws.String(key), KeyMarker: keyMarker, UploadIdMarker: uploadMarker,
+		})
+		if err != nil {
+			return fmt.Errorf("list multipart uploads for blob: %w", err)
+		}
+		for _, upload := range out.Uploads {
+			if aws.ToString(upload.Key) != key {
+				continue
+			}
+			if upload.UploadId == nil {
+				return errors.New("multipart upload listing entry has no upload ID")
+			}
+			if _, err := s.c.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+				Bucket: s.bucket, Key: upload.Key, UploadId: upload.UploadId,
+			}); err != nil {
+				return fmt.Errorf("abort multipart upload for blob: %w", err)
+			}
+		}
+		if !aws.ToBool(out.IsTruncated) {
+			return nil
+		}
+		if out.NextKeyMarker == nil {
+			return errors.New("multipart upload listing truncated without a next key marker")
+		}
+		keyMarker, uploadMarker = out.NextKeyMarker, out.NextUploadIdMarker
+	}
+}
+
 // s3Reader fetches the object lazily from the current offset, so seeking
 // (used for range requests) does not download skipped bytes.
 type s3Reader struct {
-	ctx  context.Context
-	s    *S3
-	key  *string
-	size int64
-	off  int64
-	body io.ReadCloser
+	ctx    context.Context
+	cancel context.CancelFunc
+	s      *S3
+	key    *string
+	size   int64
+	off    int64
+	body   io.ReadCloser
 }
 
 func (r *s3Reader) Read(b []byte) (int, error) {
@@ -275,8 +356,15 @@ func (r *s3Reader) Seek(offset int64, whence int) (int64, error) {
 }
 
 func (r *s3Reader) Close() error {
+	defer func() {
+		if r.cancel != nil {
+			r.cancel()
+		}
+	}()
 	if r.body != nil {
-		return r.body.Close()
+		err := r.body.Close()
+		r.body = nil
+		return err
 	}
 	return nil
 }
