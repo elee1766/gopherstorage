@@ -87,7 +87,7 @@ func Create(ctx context.Context, cfg *config.Config, store *meta.Store, blobs bl
 		if openErr != nil {
 			return fmt.Errorf("open referenced blob %s: %w", ref.Key, openErr)
 		}
-		blobPath := filepath.Join(stage, "blobs", ref.Key[:2], ref.Key[2:4], ref.Key)
+		blobPath := filepath.Join(stage, "blobs", filepath.FromSlash(blob.DefaultShard(ref.Key)))
 		if mkErr := os.MkdirAll(filepath.Dir(blobPath), 0o700); mkErr != nil {
 			r.Close()
 			return fmt.Errorf("create blob directory: %w", mkErr)

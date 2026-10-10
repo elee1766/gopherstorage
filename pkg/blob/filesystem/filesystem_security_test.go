@@ -1,4 +1,4 @@
-package blob
+package filesystem
 
 import (
 	"context"
@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/elee1766/gopherstorage/pkg/blob"
 )
 
 type interruptedUploadReader struct {
@@ -17,7 +19,7 @@ type interruptedUploadReader struct {
 
 func TestFilesystemLegacyTemporaryCleanup(t *testing.T) {
 	dir := t.TempDir()
-	s, err := NewFilesystem(dir)
+	s, err := New(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +69,7 @@ func (r *interruptedUploadReader) Read(p []byte) (int, error) {
 func TestFilesystemInterruptedUpload(t *testing.T) {
 	const key = "1234567890abcdef1234567890abcdef"
 	if dir := os.Getenv("GS_FS_CRASH_TEST_DIR"); dir != "" {
-		s, err := NewFilesystem(dir)
+		s, err := New(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -84,12 +86,12 @@ func TestFilesystemInterruptedUpload(t *testing.T) {
 	if !errors.As(err, &exit) || exit.ExitCode() != 23 {
 		t.Fatalf("interrupted upload exit = %v, output %s", err, out)
 	}
-	s, err := NewFilesystem(dir)
+	s, err := New(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if _, err := s.Open(context.Background(), key, -1); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Open(context.Background(), key, -1); !errors.Is(err, blob.ErrNotFound) {
 		t.Fatalf("interrupted upload became readable: %v", err)
 	}
 	if err := s.Delete(context.Background(), key); err != nil {
@@ -106,7 +108,7 @@ func TestFilesystemInterruptedUpload(t *testing.T) {
 	if err := s.Put(context.Background(), key, strings.NewReader("abc"), 3); err != nil {
 		t.Fatal(err)
 	}
-	st, err = os.Stat(filepath.Join(dir, shard(key)))
+	st, err = os.Stat(filepath.Join(dir, filepath.FromSlash(blob.DefaultShard(key))))
 	if err != nil || st.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("blob exposed to other users: %v, %v", st, err)
 	}

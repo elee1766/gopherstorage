@@ -12,6 +12,10 @@ A snapshot contains `meta.db`, a portable `blobs/` tree with only the immutable 
 
 ## Restore
 
+Snapshots always write blobs using the default `ab/cd/<key>` layout, even when the
+source backend uses a custom sharding callback. Restore with the default mapper,
+or explicitly migrate the snapshot's blobs before using a different layout.
+
 1. Stop the service and wait for it to exit.
 2. Preserve the existing data directory separately before replacing anything.
 3. Copy the snapshot's `meta.db` and `blobs/` into a newly created dedicated data directory, preserving the directory layout. Configure filesystem storage to use that `blobs/` path. Do not point the service at the snapshot itself as a live data directory.

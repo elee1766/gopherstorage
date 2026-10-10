@@ -1,4 +1,4 @@
-package blob
+package s3
 
 import (
 	"bytes"
@@ -18,16 +18,18 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/elee1766/gopherstorage/pkg/blob"
 )
 
-// S3 stores blobs in an S3 compatible bucket.
-type S3 struct {
+// Store stores blobs in an S3-compatible bucket.
+type Store struct {
 	c      *s3.Client
 	bucket *string
 	prefix string
+	mapper *blob.KeyMapper
 }
 
-type S3Options struct {
+type Options struct {
 	// Endpoint for non-AWS servers. Empty means AWS S3 in Region.
 	Endpoint     string
 	Region       string
@@ -54,7 +56,9 @@ const (
 
 const maxObjectSize = int64(maxPartSize) * maxParts
 
-func NewS3(ctx context.Context, o S3Options) (*S3, error) {
+// New connects to the configured bucket and returns an S3 blob store.
+func New(ctx context.Context, o Options, opts ...blob.Option) (*Store, error) {
+	mapper := blob.NewKeyMapper(opts...)
 	ctx, cancel := context.WithTimeout(ctx, s3StartupTimeout)
 	defer cancel()
 	region := o.Region
@@ -103,7 +107,7 @@ func NewS3(ctx context.Context, o S3Options) (*S3, error) {
 		so.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
 		so.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
 	})
-	s := &S3{c: c, bucket: aws.String(o.Bucket), prefix: strings.Trim(o.Prefix, "/")}
+	s := &Store{c: c, bucket: aws.String(o.Bucket), prefix: strings.Trim(o.Prefix, "/"), mapper: mapper}
 	if _, err := c.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: s.bucket}); err != nil {
 		if isNotFound(err) {
 			return nil, fmt.Errorf("bucket %q does not exist", o.Bucket)
@@ -130,25 +134,29 @@ func isNotFound(err error) bool {
 	return errors.As(err, &nsk) || errors.As(err, &nf)
 }
 
-func (s *S3) key(k string) *string {
-	if s.prefix == "" {
-		return aws.String(shard(k))
+func (s *Store) key(k string) (*string, error) {
+	p, err := s.mapper.Path(k)
+	if err != nil {
+		return nil, err
 	}
-	return aws.String(s.prefix + "/" + shard(k))
+	if s.prefix == "" {
+		return aws.String(p), nil
+	}
+	return aws.String(s.prefix + "/" + p), nil
 }
 
 // Put buffers one part at a time. Bodies under one part use a single
 // PutObject; larger ones use a multipart upload.
-func (s *S3) Put(ctx context.Context, k string, r io.Reader, size int64) error {
+func (s *Store) Put(ctx context.Context, k string, r io.Reader, size int64) error {
 	ctx, cancel := context.WithTimeout(ctx, s3OperationTimeout)
 	defer cancel()
-	if !validKey(k) {
-		return errBadKey
-	}
 	if size > maxObjectSize {
-		return ErrTooLarge
+		return blob.ErrTooLarge
 	}
-	key := s.key(k)
+	key, err := s.key(k)
+	if err != nil {
+		return err
+	}
 	partSize := int64(minPartSize)
 	if size > 0 {
 		planned := (size-1)/maxParts + 1
@@ -204,7 +212,7 @@ func (s *S3) Put(ctx context.Context, k string, r io.Reader, size int64) error {
 	var parts []types.CompletedPart
 	for num := int32(1); ; num++ {
 		if num > maxParts {
-			return abort(ErrTooLarge)
+			return abort(blob.ErrTooLarge)
 		}
 		out, err := s.c.UploadPart(ctx, &s3.UploadPartInput{
 			Bucket: s.bucket, Key: key, UploadId: mpu.UploadId, PartNumber: aws.Int32(num),
@@ -232,21 +240,23 @@ func (s *S3) Put(ctx context.Context, k string, r io.Reader, size int64) error {
 	return nil
 }
 
-func (s *S3) Open(ctx context.Context, k string, size int64) (io.ReadSeekCloser, error) {
-	if !validKey(k) {
-		return nil, errBadKey
+func (s *Store) Open(ctx context.Context, k string, size int64) (io.ReadSeekCloser, error) {
+	key, err := s.key(k)
+	if err != nil {
+		return nil, err
 	}
 	readCtx, cancel := context.WithTimeout(ctx, s3OperationTimeout)
-	return &s3Reader{ctx: readCtx, cancel: cancel, s: s, key: s.key(k), size: size}, nil
+	return &s3Reader{ctx: readCtx, cancel: cancel, s: s, key: key, size: size}, nil
 }
 
-func (s *S3) Delete(ctx context.Context, k string) error {
+func (s *Store) Delete(ctx context.Context, k string) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if !validKey(k) {
-		return errBadKey
+	key, err := s.key(k)
+	if err != nil {
+		return err
 	}
-	_, err := s.c.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: s.bucket, Key: s.key(k)})
+	_, err = s.c.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: s.bucket, Key: key})
 	if err != nil && !isNotFound(err) {
 		return err
 	}
@@ -255,13 +265,14 @@ func (s *S3) Delete(ctx context.Context, k string) error {
 
 // AbortIncomplete aborts multipart uploads for this application's exact blob key.
 // The caller must keep the corresponding pending-blob record until this succeeds.
-func (s *S3) AbortIncomplete(ctx context.Context, k string) error {
-	if !validKey(k) {
-		return errBadKey
-	}
+func (s *Store) AbortIncomplete(ctx context.Context, k string) error {
 	ctx, cancel := context.WithTimeout(ctx, s3OperationTimeout)
 	defer cancel()
-	key := aws.ToString(s.key(k))
+	keyPtr, err := s.key(k)
+	if err != nil {
+		return err
+	}
+	key := aws.ToString(keyPtr)
 	var keyMarker, uploadMarker *string
 	for pages := 0; ; pages++ {
 		if pages >= 100 {
@@ -301,7 +312,7 @@ func (s *S3) AbortIncomplete(ctx context.Context, k string) error {
 type s3Reader struct {
 	ctx    context.Context
 	cancel context.CancelFunc
-	s      *S3
+	s      *Store
 	key    *string
 	size   int64
 	off    int64
@@ -318,7 +329,7 @@ func (r *s3Reader) Read(b []byte) (int, error) {
 		})
 		if err != nil {
 			if isNotFound(err) {
-				return 0, ErrNotFound
+				return 0, blob.ErrNotFound
 			}
 			return 0, err
 		}

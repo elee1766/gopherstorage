@@ -9,7 +9,7 @@ import (
 
 	"anime.bike/remotestorage/pkg/rsserver"
 
-	"github.com/elee1766/gopherstorage/pkg/blob"
+	"github.com/elee1766/gopherstorage/pkg/blob/filesystem"
 	"github.com/elee1766/gopherstorage/pkg/config"
 	"github.com/elee1766/gopherstorage/pkg/meta"
 	"github.com/elee1766/gopherstorage/pkg/storage"
@@ -22,7 +22,7 @@ func TestView(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	blobs, err := blob.NewFilesystem(t.TempDir())
+	blobs, err := filesystem.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

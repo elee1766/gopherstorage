@@ -161,6 +161,30 @@ depth are bounded, including zero-byte documents.
 See [storage limits and recovery](docs/storage-limits.md) for configured defaults,
 upgrade cleanup behavior, and capacity outside the staging budget.
 
+### Blob backends and layouts
+
+`pkg/blob` defines the shared storage interface and construction options. The
+implementations live in `pkg/blob/filesystem` and `pkg/blob/s3`, so consumers can
+import one backend without importing the other. Build tags are not required today.
+
+Both constructors accept `blob.WithSharder(func(string) string)`:
+
+```go
+layout := blob.WithSharder(func(key string) string {
+	return key[:3] + "/" + key
+})
+files, err := filesystem.New("/var/lib/gopherstorage/blobs", layout)
+objects, err := s3.New(ctx, s3.Options{Bucket: "documents"}, layout)
+```
+
+The default remains `ab/cd/<key>`, exposed as `blob.DefaultShard`. A callback
+returns a relative slash-separated path ending in the unchanged blob key. A flat
+layout can return the key itself. Paths must be canonical, and `tmp/` is reserved
+for filesystem upload staging. Callbacks must be deterministic and safe for
+concurrent calls. This is a Go construction option, not executable YAML config.
+Changing the layout does not relocate existing blobs: keep the original function
+or migrate the objects before switching. Backups always use the default layout.
+
 Stop the service and run `gopherstorage -config config.yaml -backup /new/snapshot`.
 The command takes the same exclusive data-directory lock as the server, snapshots
 SQLite and copies the exact referenced blobs. The resulting filesystem snapshot
@@ -202,6 +226,8 @@ GS_TEST_S3_ACCESS_KEY=... GS_TEST_S3_SECRET_KEY=... go test ./pkg/...
 
 `pkg/storage` runs the protocol conformance suite from
 `anime.bike/remotestorage/pkg/rsserver/rstest` against SQLite plus each blob backend.
+See [performance review](docs/performance-notes.md) for candidate improvements and
+the measurements needed before adopting them.
 
 The web UI is in `pkg/ui`: [templ](https://templ.guide) components rendered on the
 server, [htmx](https://htmx.org) for actions (each returns the HTML fragment to swap),

@@ -1,4 +1,4 @@
-package blob
+package filesystem
 
 import (
 	"context"
@@ -8,14 +8,19 @@ import (
 	"os"
 	"path"
 	"time"
+
+	"github.com/elee1766/gopherstorage/pkg/blob"
 )
 
-// Filesystem stores blobs in a directory. Access goes through os.Root.
-type Filesystem struct {
-	root *os.Root
+// Store stores blobs in a directory. Access goes through os.Root.
+type Store struct {
+	root   *os.Root
+	mapper *blob.KeyMapper
 }
 
-func NewFilesystem(dir string) (*Filesystem, error) {
+// New opens a filesystem blob store rooted at dir.
+func New(dir string, opts ...blob.Option) (*Store, error) {
+	mapper := blob.NewKeyMapper(opts...)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -35,28 +40,15 @@ func NewFilesystem(dir string) (*Filesystem, error) {
 		r.Close()
 		return nil, err
 	}
-	return &Filesystem{root: r}, nil
+	return &Store{root: r, mapper: mapper}, nil
 }
 
-func (f *Filesystem) Close() error { return f.root.Close() }
+func (f *Store) Close() error { return f.root.Close() }
 
-func validKey(key string) bool {
-	if len(key) < 4 || len(key) > 128 {
-		return false
-	}
-	for _, c := range key {
-		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
-			return false
-		}
-	}
-	return true
-}
-
-var errBadKey = errors.New("invalid blob key")
-
-func (f *Filesystem) Put(ctx context.Context, key string, r io.Reader, _ int64) error {
-	if !validKey(key) {
-		return errBadKey
+func (f *Store) Put(ctx context.Context, key string, r io.Reader, _ int64) error {
+	dst, err := f.mapper.Path(key)
+	if err != nil {
+		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -74,7 +66,6 @@ func (f *Filesystem) Put(ctx context.Context, key string, r io.Reader, _ int64) 
 	if cerr := fh.Close(); err == nil {
 		err = cerr
 	}
-	dst := shard(key)
 	if err == nil {
 		err = f.root.MkdirAll(path.Dir(dst), 0o700)
 	}
@@ -87,23 +78,25 @@ func (f *Filesystem) Put(ctx context.Context, key string, r io.Reader, _ int64) 
 	return err
 }
 
-func (f *Filesystem) Open(ctx context.Context, key string, _ int64) (io.ReadSeekCloser, error) {
-	if !validKey(key) {
-		return nil, errBadKey
+func (f *Store) Open(ctx context.Context, key string, _ int64) (io.ReadSeekCloser, error) {
+	dst, err := f.mapper.Path(key)
+	if err != nil {
+		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	fh, err := f.root.Open(shard(key))
+	fh, err := f.root.Open(dst)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, ErrNotFound
+		return nil, blob.ErrNotFound
 	}
 	return fh, err
 }
 
-func (f *Filesystem) Delete(ctx context.Context, key string) error {
-	if !validKey(key) {
-		return errBadKey
+func (f *Store) Delete(ctx context.Context, key string) error {
+	dst, err := f.mapper.Path(key)
+	if err != nil {
+		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -115,11 +108,11 @@ func (f *Filesystem) Delete(ctx context.Context, key string) error {
 		}
 		return err
 	}
-	return errors.Join(remove("tmp/"+key), remove(shard(key)))
+	return errors.Join(remove("tmp/"+key), remove(dst))
 }
 
 // CleanupTemporary removes aged pre-migration temporary files with no blob key.
-func (f *Filesystem) CleanupTemporary(ctx context.Context, age time.Duration) (int, error) {
+func (f *Store) CleanupTemporary(ctx context.Context, age time.Duration) (int, error) {
 	if age <= 0 {
 		return 0, errors.New("temporary cleanup age must be positive")
 	}
@@ -137,7 +130,7 @@ func (f *Filesystem) CleanupTemporary(ctx context.Context, age time.Duration) (i
 		entries, err := dir.ReadDir(128)
 		for _, e := range entries {
 			// New 32-character names have pending metadata and use normal GC.
-			if len(e.Name()) != 16 || !validKey(e.Name()) {
+			if len(e.Name()) != 16 || !blob.ValidKey(e.Name()) {
 				continue
 			}
 			st, err := e.Info()

@@ -17,6 +17,8 @@ import (
 	"anime.bike/remotestorage/pkg/rsserver/rstest"
 
 	"github.com/elee1766/gopherstorage/pkg/blob"
+	"github.com/elee1766/gopherstorage/pkg/blob/filesystem"
+	"github.com/elee1766/gopherstorage/pkg/blob/s3"
 	"github.com/elee1766/gopherstorage/pkg/meta"
 	"github.com/elee1766/gopherstorage/pkg/storage"
 )
@@ -58,7 +60,7 @@ func runConformance(t *testing.T, svc *storage.Service, maxDoc int64) {
 
 func TestQuotaStopsStreamingAtAvailableBytes(t *testing.T) {
 	ctx := context.Background()
-	blobs, err := blob.NewFilesystem(t.TempDir())
+	blobs, err := filesystem.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +116,7 @@ func TestQuotaStopsStreamingAtAvailableBytes(t *testing.T) {
 
 func TestGCClaimPreventsPublishingAgedPendingBlob(t *testing.T) {
 	ctx := context.Background()
-	blobs, err := blob.NewFilesystem(t.TempDir())
+	blobs, err := filesystem.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +195,7 @@ func TestUploadReservationsAreAtomicAcrossStoresAndReleaseOnCancel(t *testing.T)
 	ctx := context.Background()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "meta.db")
-	blobs, err := blob.NewFilesystem(filepath.Join(dir, "blobs"))
+	blobs, err := filesystem.New(filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +290,7 @@ func TestPerUserConcurrentUploadSlotLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Close()
-	blobs, err := blob.NewFilesystem(filepath.Join(dir, "blobs"))
+	blobs, err := filesystem.New(filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +329,7 @@ func TestPerUserConcurrentUploadSlotLimit(t *testing.T) {
 
 func TestDisabledAccountCannotPublishUploadAlreadyInFlight(t *testing.T) {
 	ctx := context.Background()
-	blobs, err := blob.NewFilesystem(t.TempDir())
+	blobs, err := filesystem.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +367,7 @@ func TestCrashReservationReleasedByPendingBlobGC(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "meta.db")
-	blobs, err := blob.NewFilesystem(filepath.Join(dir, "blobs"))
+	blobs, err := filesystem.New(filepath.Join(dir, "blobs"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,7 +409,7 @@ func TestCrashReservationReleasedByPendingBlobGC(t *testing.T) {
 
 func TestOrphanBlobCleanupDebtConsumesStagingCapacity(t *testing.T) {
 	ctx := context.Background()
-	blobs, err := blob.NewFilesystem(t.TempDir())
+	blobs, err := filesystem.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +445,7 @@ func TestOrphanBlobCleanupDebtConsumesStagingCapacity(t *testing.T) {
 
 func TestFolderListingLimitReturnsErrorInsteadOfPartialListing(t *testing.T) {
 	ctx := context.Background()
-	blobs, err := blob.NewFilesystem(t.TempDir())
+	blobs, err := filesystem.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +481,7 @@ func TestFolderListingLimitReturnsErrorInsteadOfPartialListing(t *testing.T) {
 }
 
 func TestConformanceFilesystem(t *testing.T) {
-	b, err := blob.NewFilesystem(t.TempDir())
+	b, err := filesystem.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +495,7 @@ func TestConformanceS3(t *testing.T) {
 	if ep == "" {
 		t.Skip("GS_TEST_S3_ENDPOINT not set")
 	}
-	b, err := blob.NewS3(context.Background(), blob.S3Options{
+	b, err := s3.New(context.Background(), s3.Options{
 		Endpoint: ep, Bucket: os.Getenv("GS_TEST_S3_BUCKET"),
 		AccessKey: os.Getenv("GS_TEST_S3_ACCESS_KEY"), SecretKey: os.Getenv("GS_TEST_S3_SECRET_KEY"),
 		Prefix: "conformance-" + t.Name(), PathStyle: true,

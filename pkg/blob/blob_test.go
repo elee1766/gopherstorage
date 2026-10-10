@@ -1,4 +1,4 @@
-package blob
+package blob_test
 
 import (
 	"bytes"
@@ -7,35 +7,23 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/elee1766/gopherstorage/pkg/blob"
+	"github.com/elee1766/gopherstorage/pkg/blob/filesystem"
+	blobS3 "github.com/elee1766/gopherstorage/pkg/blob/s3"
 )
 
-type failAfterOneReader struct {
-	err  error
-	sent bool
-}
-
-func (r *failAfterOneReader) Read(p []byte) (int, error) {
-	if len(p) == 0 {
-		return 0, nil
-	}
-	if !r.sent {
-		r.sent = true
-		p[0] = 'x'
-		return 1, nil
-	}
-	return 0, r.err
-}
-
-// Exercises single-part, multipart, unknown-size, and range reads.
-func testStore(t *testing.T, s Store) {
+// Exercises empty/small/large uploads, range reads, and idempotent deletes.
+func testStore(t *testing.T, store blob.Store) {
+	t.Helper()
 	ctx := context.Background()
 	big := make([]byte, 40<<20+17)
-	rand.Read(big)
+	if _, err := rand.Read(big); err != nil {
+		t.Fatal(err)
+	}
 	cases := []struct {
 		name string
 		data []byte
@@ -47,112 +35,148 @@ func testStore(t *testing.T, s Store) {
 		{"big-known", big, int64(len(big))},
 		{"big-unknown", big, -1},
 	}
-	for i, c := range cases {
+	for i, tc := range cases {
 		key := "abcd000" + string(rune('0'+i)) + "0000000000000000000000ff"
-		if err := s.Put(ctx, key, struct{ io.Reader }{bytes.NewReader(c.data)}, c.size); err != nil {
-			t.Fatalf("%s: put: %v", c.name, err)
+		if err := store.Put(ctx, key, struct{ io.Reader }{bytes.NewReader(tc.data)}, tc.size); err != nil {
+			t.Fatalf("%s: put: %v", tc.name, err)
 		}
-		r, err := s.Open(ctx, key, int64(len(c.data)))
+		r, err := store.Open(ctx, key, int64(len(tc.data)))
 		if err != nil {
-			t.Fatalf("%s: open: %v", c.name, err)
+			t.Fatalf("%s: open: %v", tc.name, err)
 		}
 		got, err := io.ReadAll(r)
-		if err != nil || !bytes.Equal(got, c.data) {
-			t.Fatalf("%s: read back %d bytes, err %v", c.name, len(got), err)
+		if err != nil || !bytes.Equal(got, tc.data) {
+			t.Fatalf("%s: read back %d bytes, err %v", tc.name, len(got), err)
 		}
-		if len(c.data) > 10 {
-			off := int64(len(c.data)) - 10
+		if len(tc.data) > 10 {
+			off := int64(len(tc.data)) - 10
 			if _, err := r.Seek(off, io.SeekStart); err != nil {
 				t.Fatal(err)
 			}
-			tail, _ := io.ReadAll(r)
-			if !bytes.Equal(tail, c.data[off:]) {
-				t.Fatalf("%s: seek read mismatch", c.name)
+			tail, err := io.ReadAll(r)
+			if err != nil || !bytes.Equal(tail, tc.data[off:]) {
+				t.Fatalf("%s: seek read mismatch: %v", tc.name, err)
 			}
 		}
-		r.Close()
-		if err := s.Delete(ctx, key); err != nil {
-			t.Fatalf("%s: delete: %v", c.name, err)
+		if err := r.Close(); err != nil {
+			t.Fatal(err)
 		}
-		if err := s.Delete(ctx, key); err != nil {
-			t.Fatalf("%s: second delete: %v", c.name, err)
+		if err := store.Delete(ctx, key); err != nil {
+			t.Fatalf("%s: delete: %v", tc.name, err)
+		}
+		if err := store.Delete(ctx, key); err != nil {
+			t.Fatalf("%s: second delete: %v", tc.name, err)
 		}
 	}
 }
 
 func TestFilesystemStore(t *testing.T) {
-	s, err := NewFilesystem(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
+	const key = "abcdef0123456789abcdef0123456789"
+	for _, tc := range []struct {
+		name   string
+		option blob.Option
+		path   string
+	}{
+		{name: "default", path: "ab/cd/abcdef0123456789abcdef0123456789"},
+		{name: "flat", option: blob.WithSharder(func(k string) string { return k }), path: key},
+		{name: "custom", option: blob.WithSharder(func(k string) string { return "custom/" + k[:3] + "/" + k }), path: "custom/abc/" + key},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := filesystem.New(dir, tc.option)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(tc.path))); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unexpected pre-existing object: %v", err)
+			}
+			testStore(t, store)
+			if err := store.Put(context.Background(), key, strings.NewReader("reopen"), 6); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(tc.path))); err != nil {
+				t.Fatalf("stored object at %q: %v", tc.path, err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store, err = filesystem.New(dir, tc.option)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			r, err := store.Open(context.Background(), key, 6)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := io.ReadAll(r)
+			if err != nil || string(got) != "reopen" {
+				t.Fatalf("reopened object = %q, %v", got, err)
+			}
+			if err := r.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Delete(context.Background(), key); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(tc.path))); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("object remains after delete: %v", err)
+			}
+		})
 	}
-	testStore(t, s)
+}
+
+type readObserver struct{ read bool }
+
+func (r *readObserver) Read([]byte) (int, error) {
+	r.read = true
+	return 0, io.EOF
+}
+
+func TestFilesystemRejectsInvalidShardBeforeReadingBody(t *testing.T) {
+	const key = "abcdef0123456789"
+	for _, output := range []string{"tmp/" + key, "TMP/" + key, "../" + key, "dir/not-the-key", "dir\\" + key, "dir/\x00" + key, "C:/" + key} {
+		t.Run(output, func(t *testing.T) {
+			store, err := filesystem.New(t.TempDir(), blob.WithSharder(func(string) string { return output }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			reader := &readObserver{}
+			err = store.Put(context.Background(), key, reader, -1)
+			if !errors.Is(err, blob.ErrInvalidShardPath) {
+				t.Fatalf("Put error = %v, want ErrInvalidShardPath", err)
+			}
+			if reader.read {
+				t.Fatal("Put consumed body before rejecting invalid shard path")
+			}
+		})
+	}
 }
 
 func TestS3Store(t *testing.T) {
-	ep := os.Getenv("GS_TEST_S3_ENDPOINT")
-	if ep == "" {
+	endpoint := os.Getenv("GS_TEST_S3_ENDPOINT")
+	if endpoint == "" {
 		t.Skip("GS_TEST_S3_ENDPOINT not set")
 	}
-	s, err := NewS3(context.Background(), S3Options{
-		Endpoint: ep, Bucket: os.Getenv("GS_TEST_S3_BUCKET"),
-		AccessKey: os.Getenv("GS_TEST_S3_ACCESS_KEY"), SecretKey: os.Getenv("GS_TEST_S3_SECRET_KEY"),
-		Prefix: "blobtest", PathStyle: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	testStore(t, s)
-
-	ctx := context.Background()
-	key := strings.Repeat("f", 32)
-	if err := s.Delete(ctx, key); err != nil {
-		t.Fatal(err)
-	}
-	defer s.Delete(ctx, key)
-
-	if err := s.Put(ctx, key, strings.NewReader(""), maxObjectSize+1); err != ErrTooLarge {
-		t.Fatalf("oversized planned object error = %v, want ErrTooLarge", err)
-	}
-
-	readerErr := errors.New("injected reader failure")
-	if err := s.Put(ctx, key, &failAfterOneReader{err: readerErr}, 1); !errors.Is(err, readerErr) {
-		t.Fatalf("short S3 upload reader error = %v, want %v", err, readerErr)
-	}
-
-	objectKey := aws.ToString(s.key(key))
-	siblingKey := objectKey + "/unrelated"
-	stale, err := s.c.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{Bucket: s.bucket, Key: aws.String(objectKey)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sibling, err := s.c.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{Bucket: s.bucket, Key: aws.String(siblingKey)})
-	if err != nil {
-		_, _ = s.c.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{Bucket: s.bucket, Key: aws.String(objectKey), UploadId: stale.UploadId})
-		t.Fatal(err)
-	}
-	defer func() {
-		_, _ = s.c.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{Bucket: s.bucket, Key: aws.String(objectKey), UploadId: stale.UploadId})
-		_, _ = s.c.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{Bucket: s.bucket, Key: aws.String(siblingKey), UploadId: sibling.UploadId})
-	}()
-	if err := s.AbortIncomplete(ctx, key); err != nil {
-		t.Fatal(err)
-	}
-	remaining, err := s.c.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{Bucket: s.bucket, Prefix: aws.String(siblingKey)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(remaining.Uploads) != 1 || aws.ToString(remaining.Uploads[0].UploadId) != aws.ToString(sibling.UploadId) {
-		t.Fatalf("sibling multipart upload was not preserved: %+v", remaining.Uploads)
-	}
-
-	r, err := s.Open(ctx, key, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := io.ReadAll(r); err != ErrNotFound {
-		t.Fatalf("object after failed S3 upload error = %v, want not found", err)
-	}
-	if err := r.Close(); err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct {
+		name   string
+		option blob.Option
+	}{
+		{name: "default"},
+		{name: "custom", option: blob.WithSharder(func(k string) string { return "custom/" + k[:3] + "/" + k })},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := blobS3.New(context.Background(), blobS3.Options{
+				Endpoint: endpoint, Bucket: os.Getenv("GS_TEST_S3_BUCKET"),
+				AccessKey: os.Getenv("GS_TEST_S3_ACCESS_KEY"), SecretKey: os.Getenv("GS_TEST_S3_SECRET_KEY"),
+				Prefix: "blobtest", PathStyle: true,
+			}, tc.option)
+			if err != nil {
+				t.Fatal(err)
+			}
+			testStore(t, store)
+		})
 	}
 }

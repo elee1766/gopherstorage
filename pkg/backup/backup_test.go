@@ -15,6 +15,7 @@ import (
 	"anime.bike/remotestorage/pkg/rsserver"
 	"github.com/elee1766/gopherstorage/pkg/backup"
 	"github.com/elee1766/gopherstorage/pkg/blob"
+	"github.com/elee1766/gopherstorage/pkg/blob/filesystem"
 	"github.com/elee1766/gopherstorage/pkg/config"
 	"github.com/elee1766/gopherstorage/pkg/meta"
 	"github.com/elee1766/gopherstorage/pkg/storage"
@@ -29,7 +30,8 @@ func TestBackupRoundTripAndDataDirectoryExclusion(t *testing.T) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	blobs, err := blob.NewFilesystem(blobDir)
+	sourceShard := func(key string) string { return "custom/" + key[:3] + "/" + key }
+	blobs, err := filesystem.New(blobDir, blob.WithSharder(sourceShard))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +130,7 @@ func TestBackupRoundTripAndDataDirectoryExclusion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshotBlobs, err := blob.NewFilesystem(filepath.Join(destination, "blobs"))
+	snapshotBlobs, err := filesystem.New(filepath.Join(destination, "blobs"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +204,7 @@ func TestBackupRoundTripAndDataDirectoryExclusion(t *testing.T) {
 		t.Fatalf("opt-in API credentials = %#v, error %v", tokens, err)
 	}
 
-	if err := os.WriteFile(filepath.Join(blobDir, node.BlobKey[:2], node.BlobKey[2:4], node.BlobKey), []byte("truncated"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(blobDir, filepath.FromSlash(sourceShard(node.BlobKey))), []byte("truncated"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	failedDestination := filepath.Join(root, "invalid-snapshot")

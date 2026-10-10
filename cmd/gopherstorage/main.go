@@ -17,6 +17,8 @@ import (
 	"github.com/elee1766/gopherstorage/pkg/auth"
 	"github.com/elee1766/gopherstorage/pkg/backup"
 	"github.com/elee1766/gopherstorage/pkg/blob"
+	"github.com/elee1766/gopherstorage/pkg/blob/filesystem"
+	"github.com/elee1766/gopherstorage/pkg/blob/s3"
 	"github.com/elee1766/gopherstorage/pkg/config"
 	"github.com/elee1766/gopherstorage/pkg/meta"
 	"github.com/elee1766/gopherstorage/pkg/oauth"
@@ -87,11 +89,11 @@ func run() error {
 	}
 	svc := &storage.Service{
 		Meta: store, Blobs: blobs, DefaultQuota: cfg.Storage.DefaultQuotaBytes,
-		MaxDocumentBytes: cfg.Storage.MaxDocumentBytes,
+		MaxDocumentBytes:     cfg.Storage.MaxDocumentBytes,
 		MaxConcurrentUploads: cfg.Storage.MaxConcurrentUploads,
-		MaxStagingBytes: cfg.Storage.MaxStagingBytes,
-		MaxNodes: cfg.Storage.MaxNodes,
-		MaxFolderChildren: cfg.Storage.MaxFolderChildren,
+		MaxStagingBytes:      cfg.Storage.MaxStagingBytes,
+		MaxNodes:             cfg.Storage.MaxNodes,
+		MaxFolderChildren:    cfg.Storage.MaxFolderChildren,
 	}
 
 	a, err := auth.New(initCtx, cfg, store)
@@ -132,17 +134,17 @@ func run() error {
 	return nil
 }
 
-func openBlobs(ctx context.Context, cfg *config.Config) (blob.Store, error) {
+func openBlobs(ctx context.Context, cfg *config.Config, opts ...blob.Option) (blob.Store, error) {
 	switch cfg.Storage.Backend {
 	case "s3":
 		s := cfg.Storage.S3
-		return blob.NewS3(ctx, blob.S3Options{
+		return s3.New(ctx, s3.Options{
 			Endpoint: s.Endpoint, Region: s.Region, Bucket: s.Bucket, Prefix: s.Prefix,
 			AccessKey: s.AccessKey, SecretKey: s.SecretKey, SessionToken: s.SessionToken,
 			Insecure: s.Insecure, PathStyle: s.PathStyle,
-		})
+		}, opts...)
 	default:
-		return blob.NewFilesystem(cfg.Storage.Path)
+		return filesystem.New(cfg.Storage.Path, opts...)
 	}
 }
 

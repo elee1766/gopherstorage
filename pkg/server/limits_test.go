@@ -10,7 +10,7 @@ import (
 
 	"anime.bike/remotestorage/pkg/rsserver"
 	"github.com/elee1766/gopherstorage/pkg/auth"
-	"github.com/elee1766/gopherstorage/pkg/blob"
+	"github.com/elee1766/gopherstorage/pkg/blob/filesystem"
 	"github.com/elee1766/gopherstorage/pkg/config"
 	"github.com/elee1766/gopherstorage/pkg/meta"
 	"github.com/elee1766/gopherstorage/pkg/oauth"
@@ -202,7 +202,7 @@ func newLimitsTestHandler(t *testing.T, cfg *config.Config) (http.Handler, *meta
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	blobs, err := blob.NewFilesystem(t.TempDir())
+	blobs, err := filesystem.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

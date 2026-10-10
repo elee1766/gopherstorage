@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/elee1766/gopherstorage/pkg/auth"
-	"github.com/elee1766/gopherstorage/pkg/blob"
+	"github.com/elee1766/gopherstorage/pkg/blob/filesystem"
 	"github.com/elee1766/gopherstorage/pkg/config"
 	"github.com/elee1766/gopherstorage/pkg/meta"
 	"github.com/elee1766/gopherstorage/pkg/oauth"
@@ -46,7 +46,7 @@ func TestAdminUIAccountAccessControl(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	blobs, err := blob.NewFilesystem(t.TempDir())
+	blobs, err := filesystem.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
