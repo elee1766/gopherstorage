@@ -78,6 +78,7 @@ func run() error {
 		Addr:              cfg.Listen,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       5 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
 	}
 	errc := make(chan error, 1)

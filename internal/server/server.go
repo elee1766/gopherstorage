@@ -75,7 +75,7 @@ func (s *Server) authenticate(r *http.Request, token string) (*rsserver.AuthInfo
 		return nil, err
 	}
 	scopes, _ := rs.ParseScopes(ti.Scope)
-	go s.store.TouchGrant(context.WithoutCancel(r.Context()), ti.GrantID)
+	_ = s.store.TouchGrant(r.Context(), ti.GrantID)
 	return &rsserver.AuthInfo{UserID: strconv.FormatInt(ti.UserID, 10), Username: ti.Username, Scopes: scopes}, nil
 }
 
@@ -104,7 +104,6 @@ func (s *Server) Handler() http.Handler {
 	// Login and account UI
 	mux.HandleFunc("GET /auth/login", s.auth.Login)
 	mux.HandleFunc("GET /auth/callback", s.auth.Callback)
-	mux.HandleFunc("GET /auth/logout", s.auth.Logout)
 	mux.HandleFunc("POST /auth/logout", s.auth.Logout)
 	s.registerAPI(mux)
 	s.registerUI(mux)
@@ -142,6 +141,9 @@ func (s *Server) protectUI(next http.Handler) http.Handler {
 	cop.AddInsecureBypassPattern("/oauth/token")
 	cop.AddInsecureBypassPattern("/.well-known/webfinger")
 	return cop.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, StoragePrefix) && !strings.HasPrefix(r.URL.Path, ViewPrefix) {
+			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		if !strings.HasPrefix(r.URL.Path, StoragePrefix) && !strings.HasPrefix(r.URL.Path, ViewPrefix) {
 			w.Header().Set("Referrer-Policy", "same-origin")

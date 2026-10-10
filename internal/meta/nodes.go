@@ -196,9 +196,20 @@ func (s *Store) PutDocument(ctx context.Context, in PutDocument) (*PutResult, er
 			if err := tx.QueryRowContext(ctx, `SELECT used_bytes FROM users WHERE id = ?`, in.UserID).Scan(&used); err != nil {
 				return err
 			}
-			if used+delta > in.Quota {
+			if used >= in.Quota || delta > in.Quota-used {
 				return rs.ErrQuotaExceeded
 			}
+		}
+		// A collector claim and publication are serialized by the write lock.
+		// Only an unclaimed upload may become referenced by a node.
+		claim, err := tx.ExecContext(ctx, `DELETE FROM pending_blobs WHERE blob_key = ? AND reason = 'upload'`, in.BlobKey)
+		if err != nil {
+			return err
+		}
+		if n, err := claim.RowsAffected(); err != nil {
+			return err
+		} else if n != 1 {
+			return rs.ErrConflict
 		}
 		t := now()
 		etag := in.ETag
@@ -222,10 +233,7 @@ func (s *Store) PutDocument(ctx context.Context, in PutDocument) (*PutResult, er
 		if _, err := tx.ExecContext(ctx, `UPDATE users SET used_bytes = used_bytes + ? WHERE id = ?`, delta, in.UserID); err != nil {
 			return err
 		}
-		// The new blob is referenced now; the old one becomes an orphan.
-		if _, err := tx.ExecContext(ctx, `DELETE FROM pending_blobs WHERE blob_key = ?`, in.BlobKey); err != nil {
-			return err
-		}
+		// The old blob becomes an orphan.
 		if res.OldBlobKey != "" && res.OldBlobKey != in.BlobKey {
 			if err := addPending(ctx, tx, res.OldBlobKey, "orphan"); err != nil {
 				return err
@@ -325,26 +333,56 @@ type PendingBlob struct {
 // (which belong to requests that died), that no node references.
 func (s *Store) CollectableBlobs(ctx context.Context, uploadGrace time.Duration, limit int) ([]PendingBlob, error) {
 	cutoff := time.Now().Add(-uploadGrace).Unix()
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT p.blob_key, p.reason, p.created_at FROM pending_blobs p
-		WHERE (p.reason = 'orphan' OR p.created_at < ?)
-		  AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.blob_key = p.blob_key)
-		ORDER BY p.created_at LIMIT ?`, cutoff, limit)
+	var out []PendingBlob
+	err := s.write(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			SELECT p.blob_key, p.reason, p.created_at FROM pending_blobs p
+			WHERE (p.reason IN ('orphan', 'collecting') OR (p.reason = 'upload' AND p.created_at < ?))
+			  AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.blob_key = p.blob_key)
+			ORDER BY p.created_at LIMIT ?`, cutoff, limit)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var b PendingBlob
+			var t int64
+			if err := rows.Scan(&b.Key, &b.Reason, &t); err != nil {
+				rows.Close()
+				return err
+			}
+			b.CreatedAt = time.Unix(t, 0)
+			out = append(out, b)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		claimed := out[:0]
+		for _, b := range out {
+			res, err := tx.ExecContext(ctx, `UPDATE pending_blobs SET reason = 'collecting'
+				WHERE blob_key = ? AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.blob_key = pending_blobs.blob_key)`, b.Key)
+			if err != nil {
+				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n == 1 {
+				b.Reason = "collecting"
+				claimed = append(claimed, b)
+			}
+		}
+		out = claimed
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []PendingBlob
-	for rows.Next() {
-		var b PendingBlob
-		var t int64
-		if err := rows.Scan(&b.Key, &b.Reason, &t); err != nil {
-			return nil, err
-		}
-		b.CreatedAt = time.Unix(t, 0)
-		out = append(out, b)
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // ForgetBlob removes a pending entry once its blob is gone from the blob store.

@@ -20,6 +20,7 @@ import (
 
 	"github.com/elee1766/gopherstorage/internal/config"
 	"github.com/elee1766/gopherstorage/internal/meta"
+	"github.com/elee1766/gopherstorage/internal/ui"
 )
 
 const (
@@ -33,7 +34,8 @@ type Session struct {
 	UserID   int64  `json:"uid"`
 	Username string `json:"u"`
 	Name     string `json:"n,omitempty"`
-	Admin    bool   `json:"a,omitempty"`
+	// Admin is a login-time snapshot. Authorize against the current database role.
+	Admin bool `json:"a,omitempty"`
 }
 
 type Authenticator struct {
@@ -139,6 +141,7 @@ func SafeReturn(r string) string {
 }
 
 func (a *Authenticator) Login(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	fs := flowState{
 		State:    oauth2.GenerateVerifier(),
 		Nonce:    oauth2.GenerateVerifier(),
@@ -155,6 +158,7 @@ func (a *Authenticator) Login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	ctx := r.Context()
 	c, err := r.Cookie(flowCookie)
 	var fs flowState
@@ -162,14 +166,14 @@ func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "login session expired, try again", http.StatusBadRequest)
 		return
 	}
-	a.setCookie(w, flowCookie, "", -1)
 	q := r.URL.Query()
-	if e := q.Get("error"); e != "" {
-		http.Error(w, "login failed: "+e+" "+q.Get("error_description"), http.StatusUnauthorized)
-		return
-	}
 	if q.Get("state") != fs.State {
 		http.Error(w, "state mismatch", http.StatusBadRequest)
+		return
+	}
+	a.setCookie(w, flowCookie, "", -1)
+	if e := q.Get("error"); e != "" {
+		http.Error(w, "login failed: "+e+" "+q.Get("error_description"), http.StatusUnauthorized)
 		return
 	}
 	tok, err := a.oauth.Exchange(ctx, q.Get("code"), oauth2.VerifierOption(fs.Verifier))
@@ -222,21 +226,38 @@ func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Authenticator) Logout(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	a.setCookie(w, sessionCookie, "", -1)
 	if a.endSess == "" {
-		http.Redirect(w, r, "/", http.StatusFound)
+		a.logoutRedirect(w, r, "/")
 		return
 	}
 	u, err := url.Parse(a.endSess)
 	if err != nil {
-		http.Redirect(w, r, "/", http.StatusFound)
+		a.logoutRedirect(w, r, "/")
 		return
 	}
 	q := u.Query()
 	q.Set("client_id", a.cfg.ClientID)
 	q.Set("post_logout_redirect_uri", a.publicURL+"/")
 	u.RawQuery = q.Encode()
-	http.Redirect(w, r, u.String(), http.StatusFound)
+	if r.Header.Get("HX-Request") == "true" {
+		a.logoutRedirect(w, r, u.String())
+		return
+	}
+	ui.SetPageHeaders(w)
+	if err := ui.LogoutPage(u.String()).Render(r.Context(), w); err != nil {
+		slog.Error("logout page", "err", err)
+	}
+}
+
+func (a *Authenticator) logoutRedirect(w http.ResponseWriter, r *http.Request, target string) {
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("HX-Redirect", target)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, target, http.StatusFound)
 }
 
 func claimString(claims map[string]any, key string) string {

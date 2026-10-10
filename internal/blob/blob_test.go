@@ -4,10 +4,29 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
 )
+
+type failAfterOneReader struct {
+	err  error
+	sent bool
+}
+
+func (r *failAfterOneReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if !r.sent {
+		r.sent = true
+		p[0] = 'x'
+		return 1, nil
+	}
+	return 0, r.err
+}
 
 // Exercises single-part, multipart, unknown-size, and range reads.
 func testStore(t *testing.T, s Store) {
@@ -80,4 +99,30 @@ func TestS3Store(t *testing.T) {
 		t.Fatal(err)
 	}
 	testStore(t, s)
+
+	ctx := context.Background()
+	key := strings.Repeat("f", 32)
+	if err := s.Delete(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Delete(ctx, key)
+
+	if err := s.Put(ctx, key, strings.NewReader(""), maxObjectSize+1); err != ErrTooLarge {
+		t.Fatalf("oversized planned object error = %v, want ErrTooLarge", err)
+	}
+
+	readerErr := errors.New("injected reader failure")
+	if err := s.Put(ctx, key, &failAfterOneReader{err: readerErr}, 1); !errors.Is(err, readerErr) {
+		t.Fatalf("short S3 upload reader error = %v, want %v", err, readerErr)
+	}
+	r, err := s.Open(ctx, key, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(r); err != ErrNotFound {
+		t.Fatalf("object after failed S3 upload error = %v, want not found", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
 }

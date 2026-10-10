@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+const MaxAPITokens = 50
+
+var ErrTokenLimit = errors.New("too many API tokens")
+
 // APIToken is a personal token for the account API.
 type APIToken struct {
 	ID         int64
@@ -26,6 +30,16 @@ func (s *Store) CreateAPIToken(ctx context.Context, userID int64, name, token st
 	}
 	var id int64
 	err := s.write(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM api_tokens WHERE user_id = ? AND expires_at > 0 AND expires_at <= ?`, userID, t); err != nil {
+			return err
+		}
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM api_tokens WHERE user_id = ?`, userID).Scan(&count); err != nil {
+			return err
+		}
+		if count >= MaxAPITokens {
+			return ErrTokenLimit
+		}
 		return tx.QueryRowContext(ctx, `INSERT INTO api_tokens (user_id, hash, name, created_at, expires_at)
 			VALUES (?, ?, ?, ?, ?) RETURNING id`, userID, hashToken(token), name, t, exp).Scan(&id)
 	})
@@ -52,7 +66,7 @@ func (s *Store) LookupAPIToken(ctx context.Context, token string) (*APIToken, *U
 		return nil, nil, err
 	}
 	now := time.Now().Unix()
-	if exp != 0 && now > exp {
+	if exp != 0 && now >= exp {
 		return nil, nil, ErrNotFound
 	}
 	at.CreatedAt, at.LastUsedAt = time.Unix(created, 0), time.Unix(used, 0)

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -39,8 +40,12 @@ type S3Options struct {
 
 const (
 	minPartSize = 16 << 20
+	// A 64 MiB cap keeps a 10,000-part object within 625 GiB and bounds buffers.
+	maxPartSize = 64 << 20
 	maxParts    = 10000
 )
+
+const maxObjectSize = int64(maxPartSize) * maxParts
 
 func NewS3(ctx context.Context, o S3Options) (*S3, error) {
 	region := o.Region
@@ -106,10 +111,16 @@ func (s *S3) Put(ctx context.Context, k string, r io.Reader, size int64) error {
 	if !validKey(k) {
 		return errBadKey
 	}
+	if size > maxObjectSize {
+		return ErrTooLarge
+	}
 	key := s.key(k)
 	partSize := int64(minPartSize)
-	if size > 0 && (size+maxParts-1)/maxParts > partSize {
-		partSize = (size + maxParts - 1) / maxParts
+	if size > 0 {
+		planned := (size-1)/maxParts + 1
+		if planned > partSize {
+			partSize = planned
+		}
 	}
 	// Small known sizes only allocate what they need.
 	first := partSize
@@ -124,7 +135,11 @@ func (s *S3) Put(ctx context.Context, k string, r io.Reader, size int64) error {
 	if int64(n) < partSize {
 		// Whole body fits in one part.
 		var extra [1]byte
-		if m, _ := io.ReadFull(r, extra[:]); m == 0 {
+		m, err := io.ReadFull(r, extra[:])
+		if m == 0 && err != nil && err != io.EOF {
+			return err
+		}
+		if m == 0 {
 			_, err = s.c.PutObject(ctx, &s3.PutObjectInput{
 				Bucket: s.bucket, Key: key, Body: bytes.NewReader(buf[:n]), ContentLength: aws.Int64(int64(n)),
 			})
@@ -133,7 +148,7 @@ func (s *S3) Put(ctx context.Context, k string, r io.Reader, size int64) error {
 		// More data than announced: continue as a multipart upload.
 		buf = append(buf[:n], extra[0])
 		buf = append(buf, make([]byte, partSize-int64(len(buf)))...)
-		m, err := io.ReadFull(r, buf[n+1:])
+		m, err = io.ReadFull(r, buf[n+1:])
 		n += 1 + m
 		if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
 			return err
@@ -145,7 +160,9 @@ func (s *S3) Put(ctx context.Context, k string, r io.Reader, size int64) error {
 		return err
 	}
 	abort := func(cause error) error {
-		_, aerr := s.c.AbortMultipartUpload(context.WithoutCancel(ctx), &s3.AbortMultipartUploadInput{
+		abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		_, aerr := s.c.AbortMultipartUpload(abortCtx, &s3.AbortMultipartUploadInput{
 			Bucket: s.bucket, Key: key, UploadId: mpu.UploadId,
 		})
 		return errors.Join(cause, aerr)
@@ -153,7 +170,7 @@ func (s *S3) Put(ctx context.Context, k string, r io.Reader, size int64) error {
 	var parts []types.CompletedPart
 	for num := int32(1); ; num++ {
 		if num > maxParts {
-			return abort(errors.New("upload exceeds maximum number of parts"))
+			return abort(ErrTooLarge)
 		}
 		out, err := s.c.UploadPart(ctx, &s3.UploadPartInput{
 			Bucket: s.bucket, Key: key, UploadId: mpu.UploadId, PartNumber: aws.Int32(num),

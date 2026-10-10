@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"errors"
 	"time"
+
+	"anime.bike/remotestorage/pkg/rs"
 )
 
 // Grant is an app a user has authorized.
@@ -71,7 +73,7 @@ func (s *Store) LookupToken(ctx context.Context, token string) (*TokenInfo, erro
 	if err != nil {
 		return nil, err
 	}
-	if exp != 0 && time.Now().Unix() > exp {
+	if exp != 0 && time.Now().Unix() >= exp {
 		return nil, ErrNotFound
 	}
 	return &ti, nil
@@ -86,10 +88,19 @@ func (s *Store) TouchGrant(ctx context.Context, grantID int64) error {
 	})
 }
 
-// ListGrants returns the apps a user has authorized.
+// ListGrants reports the union of scopes held by live tokens and pending codes.
 func (s *Store) ListGrants(ctx context.Context, userID int64) ([]*Grant, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, user_id, client_id, client_name, scope, created_at, last_used_at
-		FROM grants WHERE user_id = ? ORDER BY created_at DESC`, userID)
+	t := now()
+	rows, err := s.db.QueryContext(ctx, `WITH active_scopes AS (
+		SELECT t.grant_id, t.scope FROM tokens t JOIN grants g ON g.id = t.grant_id
+		WHERE g.user_id = ? AND (t.expires_at = 0 OR t.expires_at > ?)
+		UNION
+		SELECT c.grant_id, c.scope FROM auth_codes c JOIN grants g ON g.id = c.grant_id
+		WHERE g.user_id = ? AND c.expires_at > ?
+	)
+	SELECT g.id, g.user_id, g.client_id, g.client_name, COALESCE(GROUP_CONCAT(a.scope, ' '), ''), g.created_at, g.last_used_at
+	FROM grants g LEFT JOIN active_scopes a ON a.grant_id = g.id
+	WHERE g.user_id = ? GROUP BY g.id ORDER BY g.created_at DESC`, userID, t, userID, t, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -102,6 +113,11 @@ func (s *Store) ListGrants(ctx context.Context, userID int64) ([]*Grant, error) 
 			return nil, err
 		}
 		g.CreatedAt, g.LastUsedAt = time.Unix(c, 0), time.Unix(l, 0)
+		scopes, invalid := rs.ParseScopes(g.Scope)
+		if len(invalid) != 0 {
+			return nil, errors.New("invalid stored grant scope")
+		}
+		g.Scope = rs.FormatScopes(scopes)
 		out = append(out, &g)
 	}
 	return out, rows.Err()
@@ -152,7 +168,7 @@ func (s *Store) RedeemAuthCode(ctx context.Context, code string) (*AuthCode, err
 		if err != nil {
 			return err
 		}
-		if time.Now().Unix() > exp {
+		if time.Now().Unix() >= exp {
 			return ErrNotFound
 		}
 		return nil
@@ -176,10 +192,13 @@ func (s *Store) GrantUser(ctx context.Context, grantID int64) (userID int64, cli
 func (s *Store) PruneExpired(ctx context.Context) error {
 	t := now()
 	return s.write(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM tokens WHERE expires_at > 0 AND expires_at < ?`, t); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM tokens WHERE expires_at > 0 AND expires_at <= ?`, t); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `DELETE FROM auth_codes WHERE expires_at < ?`, t)
+		if _, err := tx.ExecContext(ctx, `DELETE FROM api_tokens WHERE expires_at > 0 AND expires_at <= ?`, t); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `DELETE FROM auth_codes WHERE expires_at <= ?`, t)
 		return err
 	})
 }

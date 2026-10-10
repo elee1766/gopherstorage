@@ -3,11 +3,13 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -92,6 +94,18 @@ func TestAccountUIAndAPI(t *testing.T) {
 	if csp := w.Header().Get("Content-Security-Policy"); csp != ui.PageCSP || strings.Contains(csp, "unsafe") {
 		t.Errorf("account CSP %q", csp)
 	}
+	if !strings.Contains(body, `action="/auth/logout"`) || !strings.Contains(body, `method="post"`) {
+		t.Error("sign-out is not presented as a POST form")
+	}
+	if !strings.Contains(body, `hx-history="false"`) || !strings.Contains(body, `historyCacheSize&#34;:0`) {
+		t.Error("account page allows htmx history to persist one-time token markup")
+	}
+	if w := do(req{method: "GET", path: "/auth/logout", c: aliceC}); w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET logout: %d, want 405", w.Code)
+	}
+	if w := do(req{method: "POST", path: "/auth/logout", c: aliceC}); w.Code != http.StatusFound || w.Header().Get("Location") != "/" || !strings.Contains(w.Header().Get("Set-Cookie"), "gs_session=") {
+		t.Errorf("POST logout: %d, location %q, cookie %q", w.Code, w.Header().Get("Location"), w.Header().Get("Set-Cookie"))
+	}
 	if strings.Contains(body, `id="users"`) {
 		t.Error("non-admin sees the users section")
 	}
@@ -119,6 +133,21 @@ func TestAccountUIAndAPI(t *testing.T) {
 	}
 	if w := do(req{method: "POST", path: "/ui/tokens", body: "name=&expires_in_days=30", hdr: hx, c: aliceC}); w.Code != 400 || w.Header().Get("HX-Retarget") != "#flash" {
 		t.Errorf("invalid token name: %d %q", w.Code, w.Header().Get("HX-Retarget"))
+	}
+	beforeOversized, err := store.ListAPITokens(ctx, alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oversized := "name=oversized&expires_in_days=90&padding=" + strings.Repeat("x", 64<<10)
+	if w := do(req{method: "POST", path: "/ui/tokens", body: oversized, hdr: hx, c: aliceC}); w.Code == http.StatusOK {
+		t.Error("oversized control-plane body was accepted")
+	}
+	afterOversized, err := store.ListAPITokens(ctx, alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterOversized) != len(beforeOversized) {
+		t.Errorf("oversized body created a token: before=%d after=%d", len(beforeOversized), len(afterOversized))
 	}
 
 	// Create a token in the UI; the secret is shown once.
@@ -151,6 +180,86 @@ func TestAccountUIAndAPI(t *testing.T) {
 	}
 	if w, m := api("GET", "/api/v1/grants", "", tok); w.Code != 200 || len(m["grants"].([]any)) != 1 {
 		t.Errorf("grants: %d %v", w.Code, m)
+	}
+	if !strings.Contains(do(req{method: "GET", path: "/", c: aliceC}).Body.String(), "No active credentials") {
+		t.Error("grant with no live token or authorization code has no explanatory scope text")
+	}
+	if err := store.IssueToken(ctx, grantID, "oauth-broad", "notes:rw pictures:r", 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertGrant(ctx, alice.ID, "https://app.example", "app.example", "notes:r"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IssueToken(ctx, grantID, "oauth-narrow", "notes:r", 0); err != nil {
+		t.Fatal(err)
+	}
+	if ti, err := store.LookupToken(ctx, "oauth-broad"); err != nil || ti.Scope != "notes:rw pictures:r" {
+		t.Errorf("old broad token after narrower reconsent: info=%+v err=%v", ti, err)
+	}
+	if ti, err := store.LookupToken(ctx, "oauth-narrow"); err != nil || ti.Scope != "notes:r" {
+		t.Errorf("new narrow token: info=%+v err=%v", ti, err)
+	}
+	grantScopes := func() []string {
+		t.Helper()
+		w, m := api("GET", "/api/v1/grants", "", tok)
+		if w.Code != http.StatusOK {
+			t.Fatalf("list grants: %d %v", w.Code, m)
+		}
+		for _, raw := range m["grants"].([]any) {
+			g := raw.(map[string]any)
+			if g["origin"] == "https://app.example" {
+				return strings.Fields(g["scope"].(string))
+			}
+		}
+		t.Fatal("app grant missing")
+		return nil
+	}
+	containsScope := func(scopes []string, want string) bool {
+		for _, scope := range scopes {
+			if scope == want {
+				return true
+			}
+		}
+		return false
+	}
+	gotScopes := grantScopes()
+	if len(gotScopes) != 2 || !containsScope(gotScopes, "notes:rw") || !containsScope(gotScopes, "pictures:r") {
+		t.Errorf("grant scope after narrower reconsent = %v, want cumulative broad scopes", gotScopes)
+	}
+	storageReq := httptest.NewRequest("GET", "http://storage.test/storage/alice/notes/missing", nil)
+	storageReq.Header.Set("Authorization", "Bearer oauth-broad")
+	storageRes := httptest.NewRecorder()
+	h.ServeHTTP(storageRes, storageReq)
+	if storageRes.Code == http.StatusUnauthorized || storageRes.Code == http.StatusForbidden {
+		t.Fatalf("authenticated storage request rejected: %d %s", storageRes.Code, storageRes.Body.String())
+	}
+	grants, err := store.ListGrants(ctx, alice.ID)
+	if err != nil || len(grants) != 1 || grants[0].LastUsedAt.Unix() <= 0 {
+		t.Fatalf("storage request did not persist grant use: grants=%+v err=%v", grants, err)
+	}
+	time.Sleep(2100 * time.Millisecond)
+	if _, err := store.LookupToken(ctx, "oauth-broad"); !errors.Is(err, meta.ErrNotFound) {
+		t.Errorf("expired broad token lookup error = %v, want not found", err)
+	}
+	gotScopes = grantScopes()
+	if len(gotScopes) != 1 || !containsScope(gotScopes, "notes:r") {
+		t.Errorf("grant scope after broad token expiry = %v, want notes:r", gotScopes)
+	}
+	if err := store.SaveAuthCode(ctx, "pending-code", meta.AuthCode{
+		GrantID: grantID, RedirectURI: "https://app.example/callback", Scope: "pictures:rw", CodeChallenge: "challenge",
+	}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	gotScopes = grantScopes()
+	if len(gotScopes) != 2 || !containsScope(gotScopes, "notes:r") || !containsScope(gotScopes, "pictures:rw") {
+		t.Errorf("grant scope with pending authorization code = %v, want notes:r and pictures:rw", gotScopes)
+	}
+	if _, err := store.RedeemAuthCode(ctx, "pending-code"); err != nil {
+		t.Fatalf("redeem pending authorization code: %v", err)
+	}
+	gotScopes = grantScopes()
+	if len(gotScopes) != 1 || !containsScope(gotScopes, "notes:r") {
+		t.Errorf("grant scope after code redemption = %v, want notes:r", gotScopes)
 	}
 	// The API ignores cookies, rejects other bearer tokens, and has no
 	// endpoint to mint tokens.
@@ -198,6 +307,18 @@ func TestAccountUIAndAPI(t *testing.T) {
 	if w := do(req{method: "PUT", path: "/ui/admin/users/" + itoa(alice.ID) + "/quota", body: "quota_mib=lots", hdr: hx, c: adminC}); w.Code != 400 {
 		t.Errorf("UI bad quota: %d", w.Code)
 	}
+	if _, err := store.UpsertUser(ctx, meta.Login{Sub: admin.Sub, Username: admin.Username, IsAdmin: false}); err != nil {
+		t.Fatal(err)
+	}
+	if w := do(req{method: "GET", path: "/", c: adminC}); strings.Contains(w.Body.String(), `id="users"`) {
+		t.Error("demoted admin session still displays the admin user list")
+	}
+	if w := do(req{method: "PUT", path: "/ui/admin/users/" + itoa(alice.ID) + "/quota", body: "quota_mib=1", hdr: hx, c: adminC}); w.Code != http.StatusForbidden {
+		t.Errorf("stale admin cookie quota update: %d, want 403", w.Code)
+	}
+	if w, _ := api("GET", "/api/v1/admin/users", "", adminTok); w.Code != http.StatusForbidden {
+		t.Errorf("demoted admin API token: %d, want 403", w.Code)
+	}
 
 	// Revoke the app in the UI, then delete alice's token with the token
 	// itself; afterwards it no longer works. Nobody can touch others' rows.
@@ -210,6 +331,9 @@ func TestAccountUIAndAPI(t *testing.T) {
 	w = do(req{method: "DELETE", path: "/ui/grants/" + itoa(grantID), hdr: hx, c: aliceC})
 	if gs, _ := store.ListGrants(ctx, alice.ID); w.Code != 200 || len(gs) != 0 || !strings.Contains(w.Body.String(), "No apps connected") {
 		t.Errorf("revoke grant: %d %d", w.Code, len(gs))
+	}
+	if _, err := store.LookupToken(ctx, "oauth-narrow"); !errors.Is(err, meta.ErrNotFound) {
+		t.Errorf("grant revocation did not revoke OAuth token: %v", err)
 	}
 	_, m := api("GET", "/api/v1/tokens", "", tok)
 	id := int64(m["tokens"].([]any)[0].(map[string]any)["id"].(float64))
@@ -230,6 +354,77 @@ func TestAccountUIAndAPI(t *testing.T) {
 	time.Sleep(1100 * time.Millisecond)
 	if w, _ := api("GET", "/api/v1/account", "", "gsk_expired"); w.Code != 401 {
 		t.Errorf("expired token: %d", w.Code)
+	}
+
+	// The transactional cap admits only one of two concurrent creations at 49 live tokens.
+	for i := 0; i < meta.MaxAPITokens-1; i++ {
+		secret := "gsk_bulk_" + strconv.Itoa(i)
+		if _, err := store.CreateAPIToken(ctx, alice.ID, "bulk-"+strconv.Itoa(i), secret, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.CreateAPIToken(ctx, alice.ID, "expired-cap", "gsk_expired_cap", time.Nanosecond); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan int, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			body := "name=race-" + strconv.Itoa(i) + "&expires_in_days=30"
+			r := httptest.NewRequest("POST", "http://storage.test/ui/tokens", strings.NewReader(body))
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			r.Header.Set("HX-Request", "true")
+			r.Header.Set("Sec-Fetch-Site", "same-origin")
+			r.AddCookie(aliceC)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			results <- w.Code
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	created, limited := 0, 0
+	for code := range results {
+		switch code {
+		case http.StatusOK:
+			created++
+		case http.StatusConflict:
+			limited++
+		default:
+			t.Errorf("concurrent token creation status = %d, want 200 or 409", code)
+		}
+	}
+	if created != 1 || limited != 1 {
+		t.Errorf("concurrent token creations: created=%d limited=%d, want one of each", created, limited)
+	}
+	apiTokens, err := store.ListAPITokens(ctx, alice.ID)
+	if err != nil || len(apiTokens) != meta.MaxAPITokens {
+		t.Fatalf("token count after concurrent create = %d err=%v, want %d", len(apiTokens), err, meta.MaxAPITokens)
+	}
+	var deleteID int64
+	for _, apiToken := range apiTokens {
+		if apiToken.Name == "bulk-0" {
+			deleteID = apiToken.ID
+			break
+		}
+	}
+	if deleteID == 0 {
+		t.Fatal("bulk token to delete not found")
+	}
+	if err := store.DeleteAPIToken(ctx, alice.ID, deleteID); err != nil {
+		t.Fatal(err)
+	}
+	if w := do(req{method: "POST", path: "/ui/tokens", body: "name=after-delete&expires_in_days=30", hdr: hx, c: aliceC}); w.Code != http.StatusOK {
+		t.Errorf("token creation after deletion: %d, want 200", w.Code)
+	}
+	apiTokens, err = store.ListAPITokens(ctx, alice.ID)
+	if err != nil || len(apiTokens) != meta.MaxAPITokens {
+		t.Errorf("token count after reusing deleted slot = %d err=%v, want %d", len(apiTokens), err, meta.MaxAPITokens)
 	}
 }
 

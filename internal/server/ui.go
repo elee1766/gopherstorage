@@ -25,8 +25,7 @@ import (
 // form cannot send.
 
 const (
-	maxTokensPerUser = 50
-	sharedOnPage     = 50
+	sharedOnPage = 50
 )
 
 func (s *Server) registerUI(mux *http.ServeMux) {
@@ -72,7 +71,7 @@ func (s *Server) uiHandler(adminOnly bool, h uiFunc) http.HandlerFunc {
 			flash(w, r, http.StatusUnauthorized, "Your account could not be loaded. Sign in again.")
 			return
 		}
-		if adminOnly && !sess.Admin {
+		if adminOnly && !u.IsAdmin {
 			flash(w, r, http.StatusForbidden, "Only admins can do that.")
 			return
 		}
@@ -111,7 +110,7 @@ func (s *Server) accountView(r *http.Request, sess *auth.Session) (*ui.Account, 
 	}
 	a := &ui.Account{
 		Username: u.Username, Name: sess.Name, Address: u.Username + "@" + s.cfg.Host(),
-		UsedBytes: u.UsedBytes, Quota: s.effectiveQuota(u), Documents: docs, Admin: sess.Admin,
+		UsedBytes: u.UsedBytes, Quota: s.effectiveQuota(u), Documents: docs, Admin: u.IsAdmin,
 	}
 	if a.Grants, err = s.uiGrants(r, u.ID); err != nil {
 		return nil, err
@@ -126,7 +125,7 @@ func (s *Server) accountView(r *http.Request, sess *auth.Session) (*ui.Account, 
 	if a.Tokens, err = s.uiTokens(r, u.ID); err != nil {
 		return nil, err
 	}
-	if sess.Admin {
+	if u.IsAdmin {
 		if a.Users, err = s.uiUsers(r); err != nil {
 			return nil, err
 		}
@@ -203,20 +202,15 @@ func (s *Server) uiCreateToken(w http.ResponseWriter, r *http.Request, _ *auth.S
 		flash(w, r, http.StatusBadRequest, "Invalid expiry.")
 		return
 	}
-	existing, err := s.store.ListAPITokens(r.Context(), u.ID)
-	if err != nil {
-		flash(w, r, http.StatusInternalServerError, "Could not load tokens.")
-		return
-	}
-	if len(existing) >= maxTokensPerUser {
-		flash(w, r, http.StatusConflict, "You have too many tokens. Delete some first.")
-		return
-	}
 	var b [32]byte
 	rand.Read(b[:])
 	secret := APITokenPrefix + base64.RawURLEncoding.EncodeToString(b[:])
 	at, err := s.store.CreateAPIToken(r.Context(), u.ID, name, secret, time.Duration(days)*24*time.Hour)
 	if err != nil {
+		if errors.Is(err, meta.ErrTokenLimit) {
+			flash(w, r, http.StatusConflict, "You have too many tokens. Delete some first.")
+			return
+		}
 		slog.Error("create token", "err", err)
 		flash(w, r, http.StatusInternalServerError, "Could not create the token.")
 		return

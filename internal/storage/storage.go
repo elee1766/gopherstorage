@@ -92,12 +92,33 @@ func (u *userStorage) Get(ctx context.Context, p string) (*rs.Document, *rs.Fold
 
 // countingHasher hashes and counts what passes through it.
 type countingHasher struct {
-	r io.Reader
-	h hash.Hash
-	n int64
+	r        io.Reader
+	h        hash.Hash
+	n        int64
+	max      int64
+	limited  bool
+	exceeded bool
 }
 
 func (c *countingHasher) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if c.limited {
+		remaining := c.max - c.n
+		if remaining <= 0 {
+			var extra [1]byte
+			n, err := c.r.Read(extra[:])
+			if n > 0 {
+				c.exceeded = true
+				return 0, rs.ErrQuotaExceeded
+			}
+			return 0, err
+		}
+		if int64(len(p)) > remaining {
+			p = p[:remaining]
+		}
+	}
 	n, err := c.r.Read(p)
 	c.h.Write(p[:n])
 	c.n += int64(n)
@@ -106,7 +127,9 @@ func (c *countingHasher) Read(p []byte) (int, error) {
 
 func (u *userStorage) Put(ctx context.Context, p string, body io.Reader, size int64, contentType string, cond rsserver.Condition) (*rsserver.PutResult, error) {
 	// Fail fast before uploading. The real checks run again atomically in PutDocument.
+	var oldSize int64
 	if cur, err := u.svc.Meta.GetNode(ctx, u.userID, p); err == nil && !cur.IsFolder {
+		oldSize = cur.Size
 		if err := cond.Check(true, cur.ETag); err != nil {
 			return nil, err
 		}
@@ -114,19 +137,48 @@ func (u *userStorage) Put(ctx context.Context, p string, body io.Reader, size in
 		if err := cond.Check(false, ""); err != nil {
 			return nil, err
 		}
+	} else if err != nil {
+		return nil, err
 	}
-	if u.quota > 0 && size > u.quota {
-		return nil, rs.ErrQuotaExceeded
+	var maxBytes int64
+	limited := u.quota > 0
+	if limited {
+		_, used, err := u.svc.Meta.Usage(ctx, u.userID)
+		if err != nil {
+			return nil, err
+		}
+		maxBytes = oldSize
+		if used < u.quota {
+			available := u.quota - used
+			const maxInt64 = int64(^uint64(0) >> 1)
+			if oldSize > maxInt64-available {
+				maxBytes = maxInt64
+			} else {
+				maxBytes = oldSize + available
+			}
+		}
+		if size >= 0 && size > maxBytes {
+			return nil, rs.ErrQuotaExceeded
+		}
 	}
 
 	key := meta.NewBlobKey()
 	if err := u.svc.Meta.AddPendingBlob(ctx, key); err != nil {
 		return nil, err
 	}
-	ch := &countingHasher{r: body, h: sha256.New()}
+	ch := &countingHasher{r: body, h: sha256.New(), max: maxBytes, limited: limited}
 	if err := u.svc.Blobs.Put(ctx, key, ch, size); err != nil {
 		u.dropBlob(key)
+		if errors.Is(err, blob.ErrTooLarge) {
+			return nil, rs.ErrTooLarge
+		}
 		return nil, err
+	}
+	// Some blob implementations can finish a short-object upload after their
+	// one-byte overflow probe observes the reader error. Do not commit that blob.
+	if ch.exceeded {
+		u.dropBlob(key)
+		return nil, rs.ErrQuotaExceeded
 	}
 	if size >= 0 && ch.n != size {
 		u.dropBlob(key)

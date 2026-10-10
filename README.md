@@ -109,18 +109,33 @@ read or change documents. Use a remoteStorage client such as `rscli` for files. 
 can only be created in the browser, so a leaked token cannot mint new ones. Admin
 rights come from the OIDC groups at the user's last login.
 
+Grant scopes describe all unexpired app tokens and pending authorization codes,
+not just the latest consent. A narrower new token does not revoke older tokens.
+Disconnect the app to revoke every token and pending code for that origin.
+Each user may hold at most 50 personal API tokens.
+
 ## Storage
 
 Each document is a row in `meta.db` plus an immutable blob named by a random key.
 Writes upload the blob first, then commit the metadata (conditions, ancestor
 folder ETags, quota) in one SQLite transaction, then delete the replaced blob.
 Blobs from failed or interrupted writes are recorded before upload and removed
-by an hourly collector, so a crash never leaves the tree pointing at missing data.
+by an hourly collector. Collection claims a pending blob before deletion, and a
+claimed upload cannot publish its metadata.
+
+Uploads have a five-minute body read deadline. Known lengths that exceed the
+user's remaining quota are rejected before staging. Streaming uploads stop at
+the observed quota allowance, including the size of a document being replaced.
+Concurrent in-flight uploads are not reserved against this allowance, so use
+proxy concurrency limits as well as finite document and user quotas.
 
 Back up `meta.db` (SQLite online backup, `sqlite3 meta.db .backup`, or Litestream)
 together with the blob directory or bucket.
 
 ## Security notes
+
+See the [2026-10-10 security audit](docs/security-audit-2026-10-10.md) for findings,
+repairs, verification and remaining deployment risks.
 
 - Tokens are random 256-bit values. Only their SHA-256 hash is stored.
 - Apps are identified by the origin of their `redirect_uri` (no client registration,
@@ -131,6 +146,10 @@ together with the blob directory or bucket.
   `unsafe-inline`: htmx is configured not to eval, and Alpine is the CSP build.
   UI actions also require the `HX-Request` header. The JSON API ignores cookies.
 - Run behind TLS. Session cookies are `Secure` when `public_url` is https.
+- Set finite `max_document_bytes` and quotas for untrusted users. Zero remains
+  unlimited. Apply request rate and concurrency limits at the reverse proxy.
+- OIDC roles refresh at login. IdP offboarding does not automatically revoke
+  local sessions or bearer tokens, so credential revocation is a separate step.
 
 ## Development
 

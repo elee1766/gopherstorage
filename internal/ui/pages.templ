@@ -28,11 +28,16 @@ templ page(title, who string, scripts bool) {
 				<script src={ Asset("alpine-csp-3.17.4.min.js") } defer></script>
 			}
 		</head>
-		<body>
+		<body hx-history="false">
 			<header>
 				<a class="brand" href="/">gopherstorage</a>
 				if who != "" {
-					<span id="who">{ who }<a href="/auth/logout">Sign out</a></span>
+					<div id="who">
+						<span>{ who }</span>
+						<form class="inline" action="/auth/logout" method="post" hx-post="/auth/logout">
+							<button type="submit" class="small">Sign out</button>
+						</form>
+					</div>
 				}
 			</header>
 			{ children... }
@@ -42,7 +47,7 @@ templ page(title, who string, scripts bool) {
 
 // htmx must not inject inline styles or eval code, so it works under PageCSP.
 // Error responses are swapped too; the server retargets them to #flash.
-const htmxConfig = `{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false,"selfRequestsOnly":true,` +
+const htmxConfig = `{"historyCacheSize":0,"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false,"selfRequestsOnly":true,` +
 	`"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"[45]..","swap":true,"error":true}]}`
 
 templ LoginPage() {
@@ -62,6 +67,17 @@ templ MessagePage(title, msg string) {
 			if msg != "" {
 				<p>{ msg }</p>
 			}
+		</main>
+	}
+}
+
+templ LogoutPage(endSessionURL string) {
+	@page("Signed out", "", false) {
+		<main class="narrow">
+			<h1>Signed out</h1>
+			<p>Your gopherstorage session has ended.</p>
+			<p><a class="button primary" href={ templ.SafeURL(endSessionURL) }>Continue signing out of your identity provider</a></p>
+			<p><a href="/">Return to gopherstorage</a></p>
 		</main>
 	}
 }

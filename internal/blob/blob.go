@@ -11,6 +11,9 @@ import (
 // ErrNotFound is returned for missing blobs.
 var ErrNotFound = errors.New("blob not found")
 
+// ErrTooLarge reports a blob larger than the backend's supported maximum.
+var ErrTooLarge = errors.New("blob too large")
+
 // Store is a blob backend.
 type Store interface {
 	// Put stores r under key. size is -1 if unknown.

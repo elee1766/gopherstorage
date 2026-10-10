@@ -175,6 +175,9 @@ func MiB(n int64) string {
 }
 
 func scopeText(scope string) string {
+	if strings.TrimSpace(scope) == "" {
+		return "No active credentials"
+	}
 	var parts []string
 	for _, s := range strings.Fields(scope) {
 		mod, lvl, _ := strings.Cut(s, ":")
