@@ -13,11 +13,11 @@ import (
 	"time"
 
 	"anime.bike/remotestorage/pkg/rsserver"
-	"github.com/elee1766/gopherstorage/internal/backup"
-	"github.com/elee1766/gopherstorage/internal/blob"
-	"github.com/elee1766/gopherstorage/internal/config"
-	"github.com/elee1766/gopherstorage/internal/meta"
-	"github.com/elee1766/gopherstorage/internal/storage"
+	"github.com/elee1766/gopherstorage/pkg/backup"
+	"github.com/elee1766/gopherstorage/pkg/blob"
+	"github.com/elee1766/gopherstorage/pkg/config"
+	"github.com/elee1766/gopherstorage/pkg/meta"
+	"github.com/elee1766/gopherstorage/pkg/storage"
 )
 
 func TestBackupRoundTripAndDataDirectoryExclusion(t *testing.T) {

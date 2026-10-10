@@ -16,9 +16,9 @@ import (
 	"anime.bike/remotestorage/pkg/rs"
 	"anime.bike/remotestorage/pkg/rsserver"
 
-	"github.com/elee1766/gopherstorage/internal/auth"
-	"github.com/elee1766/gopherstorage/internal/meta"
-	"github.com/elee1766/gopherstorage/internal/ui"
+	"github.com/elee1766/gopherstorage/pkg/auth"
+	"github.com/elee1766/gopherstorage/pkg/meta"
+	"github.com/elee1766/gopherstorage/pkg/ui"
 )
 
 // Browser UI. GET / renders the whole page; the /ui/ endpoints are htmx

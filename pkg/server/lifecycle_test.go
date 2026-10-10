@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/elee1766/gopherstorage/internal/auth"
-	"github.com/elee1766/gopherstorage/internal/config"
-	"github.com/elee1766/gopherstorage/internal/meta"
-	"github.com/elee1766/gopherstorage/internal/oauth"
-	"github.com/elee1766/gopherstorage/internal/storage"
+	"github.com/elee1766/gopherstorage/pkg/auth"
+	"github.com/elee1766/gopherstorage/pkg/config"
+	"github.com/elee1766/gopherstorage/pkg/meta"
+	"github.com/elee1766/gopherstorage/pkg/oauth"
+	"github.com/elee1766/gopherstorage/pkg/storage"
 )
 
 func TestAdminOffboardingRevokesPersistedCredentialsAndCopiedSessions(t *testing.T) {

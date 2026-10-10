@@ -12,9 +12,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/elee1766/gopherstorage/internal/blob"
-	"github.com/elee1766/gopherstorage/internal/config"
-	"github.com/elee1766/gopherstorage/internal/meta"
+	"github.com/elee1766/gopherstorage/pkg/blob"
+	"github.com/elee1766/gopherstorage/pkg/config"
+	"github.com/elee1766/gopherstorage/pkg/meta"
 	"golang.org/x/sys/unix"
 )
 

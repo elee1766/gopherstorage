@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/elee1766/gopherstorage/internal/meta"
+	"github.com/elee1766/gopherstorage/pkg/meta"
 )
 
 func registerLifecycleAPI(mux *http.ServeMux, s *Server) {

@@ -1,4 +1,4 @@
-Vendored into internal/ui/static, unmodified:
+Vendored into pkg/ui/static, unmodified:
 
 - htmx-2.0.11.min.js: npm htmx.org@2.0.11 dist/htmx.min.js
   integrity sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==

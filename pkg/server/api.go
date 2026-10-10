@@ -13,7 +13,7 @@ import (
 	"anime.bike/remotestorage/pkg/rs"
 	"anime.bike/remotestorage/pkg/rsserver"
 
-	"github.com/elee1766/gopherstorage/internal/meta"
+	"github.com/elee1766/gopherstorage/pkg/meta"
 )
 
 // APITokenPrefix marks personal API tokens so they are easy to recognise

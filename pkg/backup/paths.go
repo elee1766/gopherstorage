@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/elee1766/gopherstorage/internal/config"
+	"github.com/elee1766/gopherstorage/pkg/config"
 )
 
 // ValidateDestination rejects existing destinations and any path overlapping

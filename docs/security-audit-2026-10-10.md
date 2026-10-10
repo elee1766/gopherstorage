@@ -52,15 +52,15 @@ The first audit pass did not repeat a full Pocket ID browser login. The follow-u
 
 ### Source map
 
-- A1: `internal/server/ui.go` (`uiHandler`, `accountView`).
+- A1: `pkg/server/ui.go` (`uiHandler`, `accountView`).
 - A2/A3: library `cmd/rscli/main.go` (`pkceLogin`, `implicitLogin`, `implicitCallbackHandler`).
-- A4: `internal/server/server.go` (`authenticate`).
-- A5: `internal/storage/storage.go` (`Put`, `countingHasher.Read`) and `cmd/gopherstorage/main.go`.
-- A6: `internal/blob/s3.go` (`Put`).
-- A7: `internal/meta/nodes.go` (`CollectableBlobs`, `PutDocument`).
-- A8: `internal/auth/auth.go` (`Callback`, `Logout`) and logout routing in `internal/server/server.go`.
-- A9: `internal/meta/oauth.go` (`ListGrants`).
-- A10: `internal/meta/apitokens.go` (`CreateAPIToken`) and `internal/meta/oauth.go` (`PruneExpired`).
+- A4: `pkg/server/server.go` (`authenticate`).
+- A5: `pkg/storage/storage.go` (`Put`, `countingHasher.Read`) and `cmd/gopherstorage/main.go`.
+- A6: `pkg/blob/s3.go` (`Put`).
+- A7: `pkg/meta/nodes.go` (`CollectableBlobs`, `PutDocument`).
+- A8: `pkg/auth/auth.go` (`Callback`, `Logout`) and logout routing in `pkg/server/server.go`.
+- A9: `pkg/meta/oauth.go` (`ListGrants`).
+- A10: `pkg/meta/apitokens.go` (`CreateAPIToken`) and `pkg/meta/oauth.go` (`PruneExpired`).
 
 ## Follow-up: closure of actionable residuals
 

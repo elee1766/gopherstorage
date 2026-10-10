@@ -21,9 +21,9 @@ import (
 
 	"anime.bike/remotestorage/pkg/rs"
 
-	"github.com/elee1766/gopherstorage/internal/auth"
-	"github.com/elee1766/gopherstorage/internal/meta"
-	"github.com/elee1766/gopherstorage/internal/ui"
+	"github.com/elee1766/gopherstorage/pkg/auth"
+	"github.com/elee1766/gopherstorage/pkg/meta"
+	"github.com/elee1766/gopherstorage/pkg/ui"
 )
 
 const codeTTL = 5 * time.Minute

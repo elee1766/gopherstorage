@@ -24,9 +24,9 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
-	"github.com/elee1766/gopherstorage/internal/config"
-	"github.com/elee1766/gopherstorage/internal/meta"
-	"github.com/elee1766/gopherstorage/internal/ui"
+	"github.com/elee1766/gopherstorage/pkg/config"
+	"github.com/elee1766/gopherstorage/pkg/meta"
+	"github.com/elee1766/gopherstorage/pkg/ui"
 )
 
 const (

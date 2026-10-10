@@ -6,9 +6,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/elee1766/gopherstorage/internal/backup"
-	"github.com/elee1766/gopherstorage/internal/config"
-	"github.com/elee1766/gopherstorage/internal/meta"
+	"github.com/elee1766/gopherstorage/pkg/backup"
+	"github.com/elee1766/gopherstorage/pkg/config"
+	"github.com/elee1766/gopherstorage/pkg/meta"
 )
 
 // runBackup is called by the -backup mode before any OIDC initialization.

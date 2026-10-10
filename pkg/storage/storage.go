@@ -17,8 +17,8 @@ import (
 	"anime.bike/remotestorage/pkg/rs"
 	"anime.bike/remotestorage/pkg/rsserver"
 
-	"github.com/elee1766/gopherstorage/internal/blob"
-	"github.com/elee1766/gopherstorage/internal/meta"
+	"github.com/elee1766/gopherstorage/pkg/blob"
+	"github.com/elee1766/gopherstorage/pkg/meta"
 )
 
 // Service gives out per-user backends.

@@ -197,20 +197,20 @@ repairs, verification and remaining deployment risks.
 go test ./...
 # blob store and full conformance against S3:
 GS_TEST_S3_ENDPOINT=http://127.0.0.1:8333 GS_TEST_S3_BUCKET=test \
-GS_TEST_S3_ACCESS_KEY=... GS_TEST_S3_SECRET_KEY=... go test ./internal/...
+GS_TEST_S3_ACCESS_KEY=... GS_TEST_S3_SECRET_KEY=... go test ./pkg/...
 ```
 
-`internal/storage` runs the protocol conformance suite from
+`pkg/storage` runs the protocol conformance suite from
 `anime.bike/remotestorage/pkg/rsserver/rstest` against SQLite plus each blob backend.
 
-The web UI is in `internal/ui`: [templ](https://templ.guide) components rendered on the
+The web UI is in `pkg/ui`: [templ](https://templ.guide) components rendered on the
 server, [htmx](https://htmx.org) for actions (each returns the HTML fragment to swap),
 and the CSP build of [Alpine.js](https://alpinejs.dev) for small client state. htmx and
-Alpine are vendored in `internal/ui/static`, so there is no JS build step. After
+Alpine are vendored in `pkg/ui/static`, so there is no JS build step. After
 editing a `.templ` file, regenerate the Go code (it is committed):
 
 ```sh
-go generate ./internal/ui    # runs go tool templ generate
+go generate ./pkg/ui    # runs go tool templ generate
 ./scripts/supply-chain-check.sh  # verify locked JS bundles and npm advisories
 ```
 

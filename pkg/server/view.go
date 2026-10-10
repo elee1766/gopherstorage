@@ -13,8 +13,8 @@ import (
 
 	"anime.bike/remotestorage/pkg/rs"
 
-	"github.com/elee1766/gopherstorage/internal/auth"
-	"github.com/elee1766/gopherstorage/internal/meta"
+	"github.com/elee1766/gopherstorage/pkg/auth"
+	"github.com/elee1766/gopherstorage/pkg/meta"
 )
 
 // ViewPrefix serves shared documents for display in browsers:

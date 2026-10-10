@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/elee1766/gopherstorage/internal/config"
-	"github.com/elee1766/gopherstorage/internal/meta"
+	"github.com/elee1766/gopherstorage/pkg/config"
+	"github.com/elee1766/gopherstorage/pkg/meta"
 	"golang.org/x/oauth2"
 )
 

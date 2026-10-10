@@ -16,9 +16,9 @@ import (
 	"anime.bike/remotestorage/pkg/rsserver"
 	"anime.bike/remotestorage/pkg/rsserver/rstest"
 
-	"github.com/elee1766/gopherstorage/internal/blob"
-	"github.com/elee1766/gopherstorage/internal/meta"
-	"github.com/elee1766/gopherstorage/internal/storage"
+	"github.com/elee1766/gopherstorage/pkg/blob"
+	"github.com/elee1766/gopherstorage/pkg/meta"
+	"github.com/elee1766/gopherstorage/pkg/storage"
 )
 
 func newService(t *testing.T, blobs blob.Store) *storage.Service {
