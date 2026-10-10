@@ -2,6 +2,9 @@
 # an unset variable is an error.
 
 listen: ":8080"
+# The example binds inside a container behind a trusted HTTPS proxy.
+# The built-in default listener is 127.0.0.1:8080.
+# allow_insecure_http: true   # development only, never for an Internet endpoint
 # The URL users open. User addresses are <username>@<host of public_url>,
 # so this host must also serve /.well-known/webfinger.
 public_url: https://storage.example.com
@@ -20,11 +23,14 @@ oidc:
   groups_claim: groups
   # If set, only members of these groups can sign in.
   # allowed_groups: [storage-users]
-  # Members can list users and set quotas.
+  # Members can list users, set quotas and disable accounts.
   admin_groups: [storage-admins]
+  # Set this client's Back-Channel Logout URL in Pocket ID to:
+  # https://storage.example.com/auth/backchannel-logout
 
 session:
   # Encrypts session cookies and signs consent forms. openssl rand -hex 32
+  # Sessions are also recorded in SQLite and revoked by logout/offboarding.
   secret: ${GS_SESSION_SECRET}
   max_age: 12h
 
@@ -32,8 +38,12 @@ storage:
   # Where document contents go: filesystem or s3. Metadata is always in SQLite.
   backend: filesystem
   # path: /var/lib/gopherstorage/blobs   # default: <data_dir>/blobs
-  max_document_bytes: 1073741824    # 1 GiB per document, 0 = unlimited
-  default_quota_bytes: 10737418240  # 10 GiB per user, 0 = unlimited
+  max_document_bytes: 67108864      # default 64 MiB per document, 0 = unlimited
+  default_quota_bytes: 1073741824   # default 1 GiB per user, 0 = unlimited
+  max_concurrent_uploads: 8         # per-user staging slots
+  max_staging_bytes: 2147483648     # global reserved staging bytes, 2 GiB
+  max_nodes: 100000                 # documents and folders per user
+  max_folder_children: 10000        # direct children per folder
 
   # s3:
   #   # Leave empty for AWS S3. Otherwise R2, B2, Garage, SeaweedFS, RustFS, MinIO, ...
@@ -49,14 +59,26 @@ storage:
 tokens:
   # Lifetime of tokens issued to apps. 0 = until revoked on the account page.
   # remoteStorage apps have no refresh flow, so short TTLs force re-connecting.
-  ttl: 0s
+  ttl: 2160h  # default 90 days. Explicit 0s opts into nonexpiring credentials.
+  # Legacy apps may require the implicit flow. Prefer S256 PKCE.
+  allow_implicit: false
 
 view:
   # /view/<user>/<path> shows /public/<path> in browsers (share links, embeds).
   # Recommended: a separate host pointed at this server, so shared HTML/SVG can
   # never touch account cookies. When set, /view/ only answers on this host and
-  # this host serves nothing else. Empty = /view/ on public_url.
+  # this host serves nothing else. On the account host, active formats and PDFs
+  # download rather than render unless explicitly opted in.
   # url: https://share.example.com
   # Let browsers and CDNs reuse responses for this long without revalidating.
   # 0 = always revalidate (cheap 304s), so edits show up immediately.
   cache_max_age: 0s
+  allow_same_origin: false
+
+http:
+  max_concurrent_requests: 128
+  rate_per_minute: 600
+  rate_burst: 120
+  max_rate_clients: 10000
+  request_timeout: 5m
+  # Rate keys use the network peer IP. Forwarded-IP headers are not trusted.
