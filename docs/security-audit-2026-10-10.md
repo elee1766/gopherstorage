@@ -48,7 +48,7 @@ Passed on the coordinated changes:
 
 These are behavior regressions, not provider mocks. Temporary baseline reproductions stay outside the repositories and are not committed. No scaffolding tests were added to either final checkout.
 
-No new full Pocket ID browser-login run was performed during this audit. HTTP integration and provider-logout response checks do not replace an end-to-end login test in each deployment.
+The first audit pass did not repeat a full Pocket ID browser login. The follow-up below includes a new real-provider browser run. Each deployment must still validate its own provider and proxy configuration.
 
 ### Source map
 
@@ -62,16 +62,47 @@ No new full Pocket ID browser-login run was performed during this audit. HTTP in
 - A9: `internal/meta/oauth.go` (`ListGrants`).
 - A10: `internal/meta/apitokens.go` (`CreateAPIToken`) and `internal/meta/oauth.go` (`PruneExpired`).
 
-## Remaining deployment and design risks
+## Follow-up: closure of actionable residuals
 
-1. **TLS is an operator requirement.** Run the public endpoint and OIDC provider over HTTPS. Keep the plain HTTP listener behind a trusted proxy or on loopback. `Secure` cookies depend on `public_url` being HTTPS. Do not allow a proxy to cache authenticated responses or log token-bearing headers, bodies or OAuth callback parameters.
-2. **Zero limits remain unlimited.** `max_document_bytes: 0` and a zero effective quota retain their documented meaning. Set finite limits for untrusted users. Per-request upload ceilings do not reserve capacity across concurrent in-flight uploads, and quotas count document bytes rather than metadata, filesystem overhead or S3 multipart state. Use proxy concurrency/rate limits, storage capacity alarms and an S3 lifecycle rule for abandoned multipart uploads.
-3. **Offboarding is not automatic.** OIDC group membership is checked at login, not on every request. Removing a user from Pocket ID does not instantly invalidate existing local session cookies or app/API tokens. Revoke credentials as part of offboarding. Stateless sessions cannot be revoked individually after theft, and logout clears the browser cookie rather than every copy of it. Session-secret rotation invalidates all sealed sessions.
-4. **Implicit OAuth remains for remoteStorage compatibility.** Prefer S256 PKCE where supported. Public-client identification is by redirect origin rather than registration. The displayed origin is the identity the user is approving, not a verified publisher name. Previously issued tokens keep their scopes until expiry or explicit revocation.
-5. **Public means public.** Anything in `/public/` is anonymously readable. Removing app access does not unpublish files. Use a separate `view.url` host to reduce coupling with the account origin. HTML/SVG sandboxing, CSP and MIME checks do not replace browser security updates or malware scanning. PDFs and other downloadable media can still be hostile content.
-6. **Network cancellation is not a complete resource policy.** Inbound reads and cleanup are bounded, but OIDC/S3/provider operations also depend on downstream networking and proxy timeouts. Slow consumers, many requests and very large folder listings require deployment-level controls.
-7. **Local data and configuration are trusted.** Protect the session secret, OIDC/S3 credentials, metadata database and blob directory. A local attacker who can modify those files is outside the isolation provided by API scopes and `os.Root`. SQLite metadata and blobs must be backed up consistently.
-8. **No exhaustive supply-chain audit.** `govulncheck` covers the Go advisory database and static reachability. The vendored htmx and Alpine bundles were inspected for their configured use, but this is not a transitive JavaScript or container-image vulnerability scan. Development examples such as `cmd/myrs` are not a production authentication service and were not treated as the deployed authorization server.
+The follow-up starts from server `e9e75ad` and library `251b2c5`. The original findings above remain a record of the first audit. The following implementation changes address its remaining controllable risks.
+
+| Original residual | Follow-up control |
+| --- | --- |
+| TLS and proxy exposure | Configuration rejects non-loopback plaintext public/OIDC/view URLs unless development is explicitly opted in. The default listener is loopback. Request hosts are allowlisted, HTTPS origins receive HSTS, and sensitive responses default to no-store. Compose exposes only a loopback port. |
+| Unlimited and concurrent resource use | Omitted document/quota settings now default to 64 MiB and 1 GiB. Explicit zero preserves the documented opt-in. SQLite reserves upload capacity before any body read, prevents duplicate replacement credit, tracks orphan debt, and retains reservations when cleanup fails. Staging, upload slots, nodes, folder children and paths have finite limits. |
+| Stateless sessions and offboarding | Browser sessions have hashed server-side identifiers, expiry and bounded counts. Logout invalidates copied cookies. Account disable atomically revokes sessions, grants, codes, app tokens and personal tokens, blocks login and hides anonymous content. Signed OIDC back-channel logout supports provider-driven revocation. Admin operations require an OIDC login within 15 minutes. Credential-reset API endpoints are available for users and administrators. |
+| Implicit OAuth | S256 PKCE is the default. Fragment-based implicit authorization requires an explicit `tokens.allow_implicit` opt-in. Consent identifies the redirect origin as an unverified publisher and explains retained older scopes. Session, grant, token and pending-code counts are bounded transactionally. |
+| Public-content exposure | Active formats and PDFs download on the account origin by default. A separate view origin supports sandboxed inline rendering. Same-origin active rendering requires an explicit opt-in. The UI and account API can unpublish individual public files. |
+| Networking and slow consumers | Global request concurrency, peer-IP rates, bounded rate-key state, request contexts, write/read/header deadlines and header size are enforced. OIDC and S3 use finite downstream operations. S3 collection aborts abandoned multipart uploads for the exact tracked object key without changing shared bucket policies. |
+| Local files and backup consistency | Dedicated data paths, owner-only metadata/blobs and non-writable configuration requirements reduce accidental exposure. Filesystem staging uses the pending blob key, so crash GC can locate partial bytes. A bounded migration cleanup handles aged legacy temporary names. The offline backup command shares an exclusive data-directory lock with the server, snapshots SQLite and copies referenced blobs into an atomically published destination. Credentials are scrubbed from snapshots by default, with secure deletion and compaction of the copied database, to avoid both revocation rollback and recovery from free pages. |
+| Supply-chain gaps | The vendored browser bundles have an exact npm manifest/lockfile, byte comparison against locked tarballs and an advisory scan command. Builder/runtime container references are digest-pinned. Build contexts exclude local secrets, and the runtime drops capabilities, disallows privilege escalation and uses a read-only root filesystem. |
+
+See `docs/storage-limits.md`, `docs/backup.md` and `docs/deployment-security.md` for limits, migration recovery and operation of these controls. Starting an upgraded server invalidates old stateless browser cookies. Existing explicitly configured unlimited quotas, nonexpiring tokens and legacy-flow opt-ins remain operator choices, not hidden defaults.
+
+### Follow-up verification
+
+- The pre-fix server accepted a remote plain-HTTP configuration and retained an actual subprocess-interrupted filesystem upload after GC deletion. Both reproductions fail against the archived baseline and pass with the repairs.
+- A pre-fix real SQLite/filesystem concurrent-upload reproduction accepted a second full body instead of rejecting it before reading. The repaired cross-Store reservation test passes under the race detector.
+- Real SQLite/filesystem checks cover copied-cookie revocation, disabled-account denial, atomic credential caps, quota/staging reservations, cancellation, restart GC, orphan debt, folder bounds and portable snapshots. Backup coverage includes identical-content replacement, truncated source rejection and credential scrubbing without changing the live database.
+- Both repositories passed `go test -race ./...`, `go vet ./...`, `go build ./...`, `govulncheck ./...` and `git diff --check`. The follow-up scans reported no vulnerabilities.
+- Chromium with a real Pocket ID 2.18 instance completed OIDC login, S256 consent and code redemption. The live checks verified cookie-only API denial, HTML/PDF upload and same-origin attachment policy, UI unpublication followed by a 404, and rejection of a copied browser cookie after local logout.
+- A real Pocket ID group-restricted client emitted a signed subject-level back-channel notification after the test user lost its allowed group. The callback returned 200. Before removal, the fresh app token could write private storage, the API token returned 200 and the browser session was authenticated. Afterward, all three credentials returned 401 and the sessions, grants, tokens, codes and API-token tables were empty. This used host networking for the isolated provider to avoid the machine's Docker-bridge-to-host routing restriction, with the canonical application Host preserved.
+- The final server race suite was rerun with live VersityGW S3 tests enabled. `TestS3Store` and `TestConformanceS3` passed, including exact-key abandoned-multipart cleanup and neighboring-object isolation.
+- `./scripts/supply-chain-check.sh` confirmed byte-for-byte matches against the locked npm packages and reported zero known npm vulnerabilities.
+- `docker compose build --no-cache gopherstorage` and Compose configuration validation passed with the restricted build contexts. After the last source changes, the image was rebuilt and scanned from its Docker archive using Grype 0.120.1 with database v6.1.10, built October 10, 2026 at 06:30:01 UTC. The result was zero matches. Scanned image configuration digest: `sha256:87226e93de728da3dccdd2b4e77da2a4c48ec7da10ec7f8d81061e3fe136d856` (Docker image index `sha256:21bb09e7732ad29822a2c10e8773be6c06c45baba2ee946e61c7b7fb833a7e11`).
+- The real offline `-backup` command produced a private final snapshot with two referenced blobs. Both matched the live store byte-for-byte, and the snapshot's sessions, API tokens, OAuth tokens, codes, grants and logout-replay tables were empty. The manifest reported `credentials_included:false`. The live database retained its accepted logout replay marker while the copied snapshot scrubbed it.
+- A scratch overlay restoring the old WebFinger background-context lookup returned 200 for a canceled request and failed the retained real-handler assertion. The repaired resolver passes the request context into SQLite and the full race suite passes. Scratch-only baseline reproductions and browser scripts are outside the repositories, with no scaffolding tests committed.
+
+## Operating assumptions that code cannot eliminate
+
+These are not open implementation findings:
+
+1. The proxy must terminate TLS and preserve the configured Host. Forwarded-IP headers are deliberately not trusted. Multiple clients behind one peer share its rate budget unless the proxy supplies its own per-user policy. Do not log credentials or cache authenticated responses outside the application.
+2. Capacity alarms, backup retention and an operator-managed S3 incomplete-multipart lifecycle rule remain necessary for service outages and provider billing. Reservations bound temporary application work, not the sum of all users' permanent quotas, filesystem overhead or externally written objects. Unknown legacy pending capacity fails closed until collection succeeds.
+3. Provider-driven revocation depends on a configured, reachable back-channel endpoint and a provider that emits the relevant notification. The local disable API provides immediate application-side offboarding. No relying party can infer an undelivered external identity change. Requests already transmitting bytes cannot retrieve them from a client.
+4. Public data can be copied before unpublication, and downloads can contain hostile content. Sandboxing and attachment defaults are not malware scanning or browser patching. Deleting a public document does not erase downloaded or externally cached copies.
+5. An attacker who controls the host, database, mounted data, secret files or trusted identity/storage provider is outside API-scope isolation. Offline snapshots are not encrypted and must be protected. Explicitly retaining credentials in a snapshot can resurrect them on restore.
+6. Advisory and image scans are time-bounded checks of known vulnerabilities. Pinning versions does not prove that dependencies are benign or that undisclosed defects do not exist. Development examples are not the deployed authorization server.
 
 ## References
 
@@ -79,4 +110,7 @@ No new full Pocket ID browser-login run was performed during this audit. HTTP in
 - Native-app loopback redirects: <https://www.rfc-editor.org/rfc/rfc8252.html>
 - Go cross-origin protection implementation: <https://go.dev/src/net/http/csrf.go>
 - Go vulnerability scanning: <https://go.dev/doc/security/vuln/>
+- OIDC back-channel logout, including logout-token validation: <https://openid.net/specs/openid-connect-backchannel-1_0.html>
+- AWS SDK retry and operation timeout configuration: <https://docs.aws.amazon.com/sdk-for-go/v2/developer-guide/configure-retries-timeouts.html>
+- AWS SDK HTTP transport configuration: <https://docs.aws.amazon.com/sdk-for-go/v2/developer-guide/configure-http.html>
 - Dependency advisories: <https://pkg.go.dev/vuln/GO-2026-5970>, <https://pkg.go.dev/vuln/GO-2026-6629>
