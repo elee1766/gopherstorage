@@ -30,7 +30,7 @@ templ page(title, who string, scripts bool) {
 		</head>
 		<body hx-history="false">
 			<header>
-				<a class="brand" href="/">gopherstorage</a>
+				<a class="brand" href="/account">gopherstorage</a>
 				if who != "" {
 					<div id="who">
 						<span>{ who }</span>
@@ -49,16 +49,6 @@ templ page(title, who string, scripts bool) {
 // Error responses are swapped too; the server retargets them to #flash.
 const htmxConfig = `{"historyCacheSize":0,"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false,"selfRequestsOnly":true,` +
 	`"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"[45]..","swap":true,"error":true}]}`
-
-templ LoginPage() {
-	@page("gopherstorage", "", false) {
-		<main class="narrow">
-			<h1>Your remoteStorage server</h1>
-			<p>Sign in to get your storage address and manage the apps that can use it.</p>
-			<a class="button primary" href="/auth/login">Sign in</a>
-		</main>
-	}
-}
 
 templ MessagePage(title, msg string) {
 	@page(title, "", false) {
@@ -86,6 +76,7 @@ templ AccountPage(a Account) {
 	@layout("gopherstorage", a.Name) {
 		<main>
 			<div id="flash" role="alert"></div>
+			<h1>Account</h1>
 			<h2>Your storage address</h2>
 			<p class="dim">Enter this in any <a href="https://remotestorage.io/apps/" rel="noopener">remoteStorage app</a> to connect it.</p>
 			<div class="address">
@@ -99,9 +90,6 @@ templ AccountPage(a Account) {
 					of { Size(a.Quota) }
 				}
 			</p>
-			if a.Quota > 0 {
-				<progress max="100" value={ percent(a.UsedBytes, a.Quota) }></progress>
-			}
 			@AppsSection(a.Grants)
 			@SharedSection(a.Shared)
 			@TokensSection(a.Tokens)
@@ -122,28 +110,30 @@ templ AppsSection(grants []Grant) {
 		if len(grants) == 0 {
 			<p class="dim">No apps connected yet.</p>
 		} else {
-			<table>
-				<thead><tr><th>App</th><th>Access</th><th>Last used</th><th></th></tr></thead>
-				<tbody>
-					for _, g := range grants {
-						<tr>
-							<td><div>{ g.Client }</div><div class="dim small">{ g.Origin }</div></td>
-							<td>{ scopeText(g.Scope) }</td>
-							<td>@timeOrNever(g.LastUsed)</td>
-							<td class="ops">
-								<button
-									type="button"
-									class="small danger"
-									hx-delete={ fmt.Sprintf("/ui/grants/%d", g.ID) }
-									hx-confirm={ "Disconnect " + g.Client + "? It will lose access to your storage." }
-									hx-target="#apps"
-									hx-swap="outerHTML"
-								>Disconnect</button>
-							</td>
-						</tr>
-					}
-				</tbody>
-			</table>
+			<div class="table-scroll" role="region" aria-label="Connected apps" tabindex="0">
+				<table>
+					<thead><tr><th>App</th><th>Access</th><th>Last used</th><th></th></tr></thead>
+					<tbody>
+						for _, g := range grants {
+							<tr>
+								<td><div>{ g.Client }</div><div class="dim small">{ g.Origin }</div></td>
+								<td>{ scopeText(g.Scope) }</td>
+								<td>@timeOrNever(g.LastUsed)</td>
+								<td class="ops">
+									<button
+										type="button"
+										class="small danger"
+										hx-delete={ fmt.Sprintf("/ui/grants/%d", g.ID) }
+										hx-confirm={ "Disconnect " + g.Client + "? It will lose access to your storage." }
+										hx-target="#apps"
+										hx-swap="outerHTML"
+									>Disconnect</button>
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			</div>
 		}
 	</section>
 }
@@ -155,28 +145,30 @@ templ SharedSection(files []Shared) {
 		if len(files) == 0 {
 			<p class="dim">Nothing shared yet.</p>
 		} else {
-			<table>
-				<thead><tr><th>File</th><th class="num">Size</th><th>Modified</th><th></th></tr></thead>
-				<tbody>
-					for _, f := range files {
-						<tr>
-							<td>
-								<a href={ templ.SafeURL(f.URL) } target="_blank" rel="noopener">{ f.Path[len("/public/"):] }</a>
-								<div class="dim small">{ f.ContentType }</div>
-							</td>
-							<td class="num">{ Size(f.Size) }</td>
-							<td>@timestamp(f.Modified)</td>
-							<td class="ops">
+			<div class="table-scroll" role="region" aria-label="Shared files" tabindex="0">
+				<table>
+					<thead><tr><th>File</th><th class="num">Size</th><th>Modified</th><th></th></tr></thead>
+					<tbody>
+						for _, f := range files {
+							<tr>
+								<td>
+									<a href={ templ.SafeURL(f.URL) } target="_blank" rel="noopener">{ f.Path[len("/public/"):] }</a>
+									<div class="dim small">{ f.ContentType }</div>
+								</td>
+								<td class="num">{ Size(f.Size) }</td>
+								<td>@timestamp(f.Modified)</td>
+								<td class="ops">
 									@copyButton("Copy link", f.URL)
 									<form class="inline" hx-post="/ui/unpublish" hx-target="#shared" hx-swap="outerHTML" hx-confirm={ "Unpublish " + f.Path + "? This deletes the server copy and stops this link from working. It cannot remove copies already downloaded." }>
 										<input type="hidden" name="path" value={ f.Path }/>
 										<button type="submit" class="small danger">Unpublish</button>
 									</form>
 								</td>
-						</tr>
-					}
-				</tbody>
-			</table>
+							</tr>
+						}
+					</tbody>
+				</table>
+			</div>
 		}
 	</section>
 }
@@ -196,35 +188,37 @@ templ TokensSection(t Tokens) {
 			</div>
 		}
 		if len(t.List) > 0 {
-			<table>
-				<thead><tr><th>Name</th><th>Created</th><th>Last used</th><th>Expires</th><th></th></tr></thead>
-				<tbody>
-					for _, k := range t.List {
-						<tr>
-							<td>{ k.Name }</td>
-							<td>@timestamp(k.Created)</td>
-							<td>@timeOrNever(k.LastUsed)</td>
-							<td>
-								if k.Expires.IsZero() {
-									never
-								} else {
-									@timestamp(k.Expires)
-								}
-							</td>
-							<td class="ops">
-								<button
-									type="button"
-									class="small danger"
-									hx-delete={ fmt.Sprintf("/ui/tokens/%d", k.ID) }
-									hx-confirm={ "Delete token " + k.Name + "? Anything using it will stop working." }
-									hx-target="#tokens"
-									hx-swap="outerHTML"
-								>Delete</button>
-							</td>
-						</tr>
-					}
-				</tbody>
-			</table>
+			<div class="table-scroll" role="region" aria-label="API tokens" tabindex="0">
+				<table>
+					<thead><tr><th>Name</th><th>Created</th><th>Last used</th><th>Expires</th><th></th></tr></thead>
+					<tbody>
+						for _, k := range t.List {
+							<tr>
+								<td>{ k.Name }</td>
+								<td>@timestamp(k.Created)</td>
+								<td>@timeOrNever(k.LastUsed)</td>
+								<td>
+									if k.Expires.IsZero() {
+										never
+									} else {
+										@timestamp(k.Expires)
+									}
+								</td>
+								<td class="ops">
+									<button
+										type="button"
+										class="small danger"
+										hx-delete={ fmt.Sprintf("/ui/tokens/%d", k.ID) }
+										hx-confirm={ "Delete token " + k.Name + "? Anything using it will stop working." }
+										hx-target="#tokens"
+										hx-swap="outerHTML"
+									>Delete</button>
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			</div>
 		}
 		<form class="inline" hx-post="/ui/tokens" hx-target="#tokens" hx-swap="outerHTML">
 			<input name="name" placeholder="Token name, e.g. laptop" required maxlength="100" aria-label="Token name"/>
@@ -242,14 +236,16 @@ templ TokensSection(t Tokens) {
 templ UsersSection(u Users) {
 	<section id="users">
 		<h2>Users</h2>
-		<table>
-			<thead><tr><th>User</th><th>Status</th><th class="num">Used</th><th class="num">Quota</th><th>Last login</th><th></th></tr></thead>
-			<tbody>
-				for _, x := range u.List {
-					@UserRow(x, u.DefaultQuota)
-				}
-			</tbody>
-		</table>
+		<div class="table-scroll" role="region" aria-label="Users" tabindex="0">
+			<table>
+				<thead><tr><th>User</th><th>Status</th><th class="num">Used</th><th class="num">Quota</th><th>Last login</th><th></th></tr></thead>
+				<tbody>
+					for _, x := range u.List {
+						@UserRow(x, u.DefaultQuota)
+					}
+				</tbody>
+			</table>
+		</div>
 	</section>
 }
 
@@ -258,17 +254,17 @@ templ UserRow(x User, defaultQuota int64) {
 		<td>
 			{ x.Username }
 			if x.Admin {
-				<span class="badge">admin</span>
+				<span class="badge">(admin)</span>
 			}
 		</td>
 		<td>
-				if x.Disabled {
-					<span class="badge">disabled</span>
-				} else {
-					<span class="dim">enabled</span>
-				}
-			</td>
-			<td class="num">{ Size(x.UsedBytes) }</td>
+			if x.Disabled {
+				<span class="badge">disabled</span>
+			} else {
+				<span class="dim">enabled</span>
+			}
+		</td>
+		<td class="num">{ Size(x.UsedBytes) }</td>
 		<td class="num">
 			if x.QuotaBytes != 0 {
 				{ Size(x.QuotaBytes) }
@@ -281,17 +277,17 @@ templ UserRow(x User, defaultQuota int64) {
 		<td>@timestamp(x.LastLogin)</td>
 		<td class="ops">
 			if x.Disabled {
-					<form class="inline" hx-put={ fmt.Sprintf("/ui/admin/users/%d/access", x.ID) } hx-target="closest tr" hx-swap="outerHTML" hx-confirm={ "Re-enable " + x.Username + "? They must sign in again. Their previous sessions, apps, and API tokens were revoked." }>
-						<input type="hidden" name="disabled" value="false"/>
-						<button type="submit" class="small primary">Enable</button>
-					</form>
-				} else {
-					<form class="inline" hx-put={ fmt.Sprintf("/ui/admin/users/%d/access", x.ID) } hx-target="closest tr" hx-swap="outerHTML" hx-confirm={ "Disable " + x.Username + "? This revokes their sessions, app credentials, and API tokens." }>
-						<input type="hidden" name="disabled" value="true"/>
-						<button type="submit" class="small danger">Disable</button>
-					</form>
-				}
-				<button type="button" class="small" x-show="!open" x-on:click="toggle">Set quota</button>
+				<form class="inline" hx-put={ fmt.Sprintf("/ui/admin/users/%d/access", x.ID) } hx-target="closest tr" hx-swap="outerHTML" hx-confirm={ "Re-enable " + x.Username + "? They must sign in again. Their previous sessions, apps, and API tokens were revoked." }>
+					<input type="hidden" name="disabled" value="false"/>
+					<button type="submit" class="small primary">Enable</button>
+				</form>
+			} else {
+				<form class="inline" hx-put={ fmt.Sprintf("/ui/admin/users/%d/access", x.ID) } hx-target="closest tr" hx-swap="outerHTML" hx-confirm={ "Disable " + x.Username + "? This revokes their sessions, app credentials, and API tokens." }>
+					<input type="hidden" name="disabled" value="true"/>
+					<button type="submit" class="small danger">Disable</button>
+				</form>
+			}
+			<button type="button" class="small" x-show="!open" x-on:click="toggle">Set quota</button>
 			<form
 				class="inline"
 				x-show="open"
@@ -329,13 +325,13 @@ templ ConsentPage(c Consent) {
 		<main class="narrow">
 			<h1>Allow access to your storage?</h1>
 			<p><strong>{ c.Client }</strong> wants to access the storage of <strong>{ c.User }</strong>.</p>
-			<p class="warn">This origin is supplied by the app and is not a verified publisher identity. Public information shown here may be copied and retained by others.</p>
+			<p class="warn"><strong>Warning:</strong> This origin is supplied by the app and is not a verified publisher identity. Public information shown here may be copied and retained by others.</p>
 			<p class="dim">Approving may update this app's grant. Credentials already issued keep their existing access until you revoke the app on your account page.</p>
 			if c.Insecure {
-				<p class="warn">This app is served over plain http.</p>
+				<p class="warn"><strong>Warning:</strong> This app is served over plain http.</p>
 			}
 			if c.FullScope {
-				<p class="warn">This app asks for access to <strong>all</strong> your data.</p>
+				<p class="warn"><strong>Warning:</strong> This app asks for access to <strong>all</strong> your data.</p>
 			}
 			<ul class="scopes">
 				for _, s := range c.Scopes {
@@ -367,7 +363,7 @@ templ ConsentPage(c Consent) {
 					<button name="decision" value="deny">Deny</button>
 				</div>
 			</form>
-			<p class="dim">You can revoke access later on the <a href="/">account page</a>.</p>
+			<p class="dim">You can revoke access later on the <a href="/account">account page</a>.</p>
 		</main>
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
@@ -21,7 +22,7 @@ import (
 	"github.com/elee1766/gopherstorage/pkg/ui"
 )
 
-// Browser UI. GET / renders the whole page; the /ui/ endpoints are htmx
+// Browser UI. GET /account renders the console; the /ui/ endpoints are htmx
 // actions that return the HTML fragment to swap in. They use the session
 // cookie and are protected against CSRF by http.CrossOriginProtection
 // (Sec-Fetch-Site / Origin) plus the HX-Request header, which a cross-origin
@@ -33,6 +34,7 @@ const (
 
 func (s *Server) registerUI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{$}", s.handleIndex)
+	mux.HandleFunc("GET /account", s.handleAccount)
 	mux.HandleFunc("DELETE /ui/grants/{id}", s.uiHandler(false, s.uiRevokeGrant))
 	mux.HandleFunc("POST /ui/unpublish", s.uiHandler(false, s.uiUnpublish))
 	mux.HandleFunc("POST /ui/tokens", s.uiHandler(false, s.uiCreateToken))
@@ -85,14 +87,21 @@ func (s *Server) uiHandler(adminOnly bool, h uiFunc) http.HandlerFunc {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	fmt.Fprintf(w, "gopherstorage\n\nremoteStorage server\n\naccount: %s/account\n", s.cfg.PublicURL)
+}
+
+func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	sess := s.auth.Current(r)
 	if sess == nil {
-		render(w, r, http.StatusOK, ui.LoginPage())
+		http.Redirect(w, r, "/auth/login?return=%2Faccount", http.StatusFound)
 		return
 	}
 	a, err := s.accountView(r, sess)
 	if errors.Is(err, meta.ErrNotFound) {
-		render(w, r, http.StatusOK, ui.LoginPage())
+		http.Redirect(w, r, "/auth/login?return=%2Faccount", http.StatusFound)
 		return
 	}
 	if err != nil {

@@ -244,11 +244,15 @@ func SafeReturn(r string) string {
 
 func (a *Authenticator) Login(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	returnTo := r.URL.Query().Get("return")
+	if returnTo == "" {
+		returnTo = "/account"
+	}
 	fs := flowState{
 		State:    oauth2.GenerateVerifier(),
 		Nonce:    oauth2.GenerateVerifier(),
 		Verifier: oauth2.GenerateVerifier(),
-		Return:   SafeReturn(r.URL.Query().Get("return")),
+		Return:   SafeReturn(returnTo),
 	}
 	v, err := a.flow.seal(fs, flowTTL)
 	if err != nil {

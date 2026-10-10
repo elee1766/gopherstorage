@@ -198,13 +198,6 @@ func iso(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
 func utc(t time.Time) string { return t.UTC().Format("2006-01-02 15:04 UTC") }
 
-func percent(used, quota int64) string {
-	if quota <= 0 {
-		return "0"
-	}
-	return fmt.Sprintf("%d", min(100, used*100/quota))
-}
-
 func plural(n int64, one, many string) string {
 	if n == 1 {
 		return one

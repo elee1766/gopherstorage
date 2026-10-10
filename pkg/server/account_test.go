@@ -82,11 +82,18 @@ func TestAccountUIAndAPI(t *testing.T) {
 	}
 	hx := []string{"HX-Request", "true", "Sec-Fetch-Site", "same-origin"}
 
-	// Signed out: login page. Signed in: account page with strict CSP.
-	if w := do(req{method: "GET", path: "/"}); w.Code != 200 || !strings.Contains(w.Body.String(), `href="/auth/login"`) {
-		t.Fatalf("login page: %d", w.Code)
+	// The landing page stays plain text, independent of the browser session.
+	for _, c := range []*http.Cookie{nil, aliceC, adminC} {
+		w := do(req{method: "GET", path: "/", c: c})
+		if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "text/plain; charset=utf-8" || w.Header().Get("X-Content-Type-Options") != "nosniff" || strings.Contains(w.Body.String(), "<") || !strings.Contains(w.Body.String(), "http://storage.test/account") || strings.Contains(w.Body.String(), "alice@") {
+			t.Fatalf("plain-text landing: %d %v\n%s", w.Code, w.Header(), w.Body.String())
+		}
 	}
-	w := do(req{method: "GET", path: "/", c: aliceC})
+	// Signed out: redirect to login. Signed in: account page with strict CSP.
+	if w := do(req{method: "GET", path: "/account"}); w.Code != http.StatusFound || w.Header().Get("Location") != "/auth/login?return=%2Faccount" || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("account login redirect: %d %v", w.Code, w.Header())
+	}
+	w := do(req{method: "GET", path: "/account", c: aliceC})
 	body := w.Body.String()
 	if w.Code != 200 || !strings.Contains(body, "alice@storage.test") || !strings.Contains(body, "app.example") {
 		t.Fatalf("account page: %d\n%s", w.Code, body)
@@ -106,14 +113,14 @@ func TestAccountUIAndAPI(t *testing.T) {
 	if w := do(req{method: "POST", path: "/auth/logout", c: aliceC}); w.Code != http.StatusFound || w.Header().Get("Location") != "/" || !strings.Contains(w.Header().Get("Set-Cookie"), "gs_session=") {
 		t.Errorf("POST logout: %d, location %q, cookie %q", w.Code, w.Header().Get("Location"), w.Header().Get("Set-Cookie"))
 	}
-	if w := do(req{method: "GET", path: "/", c: aliceC}); w.Code != http.StatusOK || strings.Contains(w.Body.String(), "alice@storage.test") {
+	if w := do(req{method: "GET", path: "/account", c: aliceC}); w.Code != http.StatusFound || w.Header().Get("Location") != "/auth/login?return=%2Faccount" || strings.Contains(w.Body.String(), "alice@storage.test") {
 		t.Errorf("copied cookie remained authenticated after logout: %d %s", w.Code, w.Body.String())
 	}
 	aliceC = cookie(alice)
 	if strings.Contains(body, `id="users"`) {
 		t.Error("non-admin sees the users section")
 	}
-	if !strings.Contains(do(req{method: "GET", path: "/", c: adminC}).Body.String(), `id="users"`) {
+	if !strings.Contains(do(req{method: "GET", path: "/account", c: adminC}).Body.String(), `id="users"`) {
 		t.Error("admin does not see the users section")
 	}
 	// Every asset the page references is served.
@@ -160,7 +167,7 @@ func TestAccountUIAndAPI(t *testing.T) {
 	if w.Code != 200 || tok == "" || !strings.HasPrefix(w.Body.String(), `<section id="tokens">`) {
 		t.Fatalf("create token: %d\n%s", w.Code, w.Body.String())
 	}
-	if strings.Contains(do(req{method: "GET", path: "/", c: aliceC}).Body.String(), tok) {
+	if strings.Contains(do(req{method: "GET", path: "/account", c: aliceC}).Body.String(), tok) {
 		t.Error("token secret shown again on reload")
 	}
 
@@ -192,7 +199,7 @@ func TestAccountUIAndAPI(t *testing.T) {
 	if w, m := api("GET", "/api/v1/grants", "", tok); w.Code != 200 || len(m["grants"].([]any)) != 1 {
 		t.Errorf("grants: %d %v", w.Code, m)
 	}
-	if !strings.Contains(do(req{method: "GET", path: "/", c: aliceC}).Body.String(), "No active credentials") {
+	if !strings.Contains(do(req{method: "GET", path: "/account", c: aliceC}).Body.String(), "No active credentials") {
 		t.Error("grant with no live token or authorization code has no explanatory scope text")
 	}
 	if err := store.IssueToken(ctx, grantID, "oauth-broad", "notes:rw pictures:r", 2*time.Second); err != nil {
@@ -321,7 +328,7 @@ func TestAccountUIAndAPI(t *testing.T) {
 	if _, err := store.UpsertUser(ctx, meta.Login{Sub: admin.Sub, Username: admin.Username, IsAdmin: false}); err != nil {
 		t.Fatal(err)
 	}
-	if w := do(req{method: "GET", path: "/", c: adminC}); strings.Contains(w.Body.String(), `id="users"`) {
+	if w := do(req{method: "GET", path: "/account", c: adminC}); strings.Contains(w.Body.String(), `id="users"`) {
 		t.Error("demoted admin session still displays the admin user list")
 	}
 	if w := do(req{method: "PUT", path: "/ui/admin/users/" + itoa(alice.ID) + "/quota", body: "quota_mib=1", hdr: hx, c: adminC}); w.Code != http.StatusForbidden {

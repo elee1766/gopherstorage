@@ -27,8 +27,8 @@ export GS_OIDC_CLIENT_ID=... GS_OIDC_CLIENT_SECRET=... GS_SESSION_SECRET=$(opens
 go run ./cmd/gopherstorage -config config.yaml
 ```
 
-Open the server, sign in, copy your address, and enter it in a remoteStorage
-app (for example from <https://remotestorage.io/apps/>).
+Open `/account` on the server, sign in, copy your address, and enter it in a
+remoteStorage app (for example from <https://remotestorage.io/apps/>).
 
 `gopherstorage -check -config config.yaml` validates a config without starting.
 Public URLs and the OIDC issuer require HTTPS outside loopback. Plain HTTP on a
@@ -68,7 +68,8 @@ Administrator operations require an OIDC login within the last 15 minutes.
 | `/view/<user>/<path>` | shows `/public/<path>` in browsers, for sharing and embedding |
 | `/oauth/authorize` | app authorization with S256 PKCE, or explicitly enabled implicit flow |
 | `/oauth/token` | PKCE token endpoint |
-| `/` | account page |
+| `/` | plain-text landing page with the account URL |
+| `/account` | account and administrator console |
 | `/api/v1/...` | account API for scripts, see below |
 | `POST /auth/logout` | revoke the current browser session |
 | `POST /auth/backchannel-logout` | signed OIDC logout notifications |
