@@ -1,0 +1,48 @@
+:root {
+  --fg: #1d1d1f;
+  --dim: #6b6b70;
+  --bg: #fff;
+  --line: #e4e4e7;
+  --accent: #2563eb;
+  --danger: #b91c1c;
+  font-family: system-ui, sans-serif;
+  font-size: 15px;
+  color: var(--fg);
+  background: var(--bg);
+}
+@media (prefers-color-scheme: dark) {
+  :root { --fg: #e7e7ea; --dim: #9a9aa2; --bg: #17171a; --line: #2c2c31; --accent: #60a5fa; --danger: #f87171; }
+}
+body { margin: 0; }
+header { display: flex; justify-content: space-between; align-items: center; padding: 12px 20px; border-bottom: 1px solid var(--line); }
+.brand { font-weight: 600; color: var(--fg); text-decoration: none; }
+#who { color: var(--dim); }
+#who a { margin-left: 12px; }
+main { max-width: 1000px; margin: 0 auto; padding: 20px; }
+a { color: var(--accent); }
+button, .button {
+  font: inherit; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px;
+  background: transparent; color: var(--fg); cursor: pointer; text-decoration: none; display: inline-block;
+}
+button:hover, .button:hover { border-color: var(--accent); }
+button.danger { color: var(--danger); }
+button.small { padding: 2px 8px; font-size: 13px; }
+#mounts { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+#mounts a { padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); text-decoration: none; color: var(--fg); }
+#mounts a.active { border-color: var(--accent); color: var(--accent); }
+#toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+#crumbs a { text-decoration: none; }
+#crumbs span.sep { color: var(--dim); margin: 0 4px; }
+.actions { display: flex; gap: 8px; }
+#status { min-height: 1.4em; color: var(--dim); font-size: 13px; }
+#status.error { color: var(--danger); }
+#drop { border: 2px dashed transparent; border-radius: 8px; }
+#drop.over { border-color: var(--accent); }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); }
+th { color: var(--dim); font-weight: 500; font-size: 13px; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.ops { text-align: right; white-space: nowrap; }
+td.ops button { margin-left: 4px; }
+tr.dir td.name a { font-weight: 500; }
+#empty { color: var(--dim); text-align: center; padding: 24px; }

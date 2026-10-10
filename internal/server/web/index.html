@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gopherstorage</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header>
+  <a class="brand" href="/">gopherstorage</a>
+  <span id="who"></span>
+</header>
+<main>
+  <section id="login" hidden>
+    <p>You are not signed in.</p>
+    <a class="button" id="login-link" href="/auth/login">Sign in</a>
+  </section>
+  <section id="app" hidden>
+    <nav id="mounts"></nav>
+    <div id="toolbar">
+      <div id="crumbs"></div>
+      <div class="actions">
+        <button id="mkdir" type="button">New folder</button>
+        <label class="button" id="upload-label">Upload<input id="upload" type="file" multiple hidden></label>
+      </div>
+    </div>
+    <div id="status"></div>
+    <div id="drop">
+      <table id="listing">
+        <thead><tr><th>Name</th><th class="num">Size</th><th>Modified</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p id="empty" hidden>This folder is empty.</p>
+    </div>
+  </section>
+</main>
+</body>
+</html>
