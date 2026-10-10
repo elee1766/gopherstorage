@@ -10,8 +10,10 @@ or any other client) keep their data in your server instead of their own.
   consent page, and get a scoped token. Implicit grant and PKCE code flow are supported.
 - Metadata (the document tree, ETags, tokens, quotas) lives in SQLite.
   Document contents go to a local directory or any S3 compatible bucket.
-- The account page shows the storage address, usage, and connected apps,
-  which can be disconnected. Admins can set per-user quotas.
+- The account page shows the storage address, usage, connected apps (which can be
+  disconnected), shared files and API tokens. Admins can set per-user quotas.
+- A JSON account API (`/api/v1/`) does the same for scripts and CLIs, with personal
+  API tokens created on the account page.
 
 The protocol layer is [anime.bike/remotestorage](https://github.com/elee1766/remotestorage).
 
@@ -53,6 +55,7 @@ renames their storage address.
 | `/oauth/authorize` | app authorization (implicit and PKCE) with a consent page |
 | `/oauth/token` | PKCE token endpoint |
 | `/` | account page |
+| `/api/v1/...` | account API for scripts, see below |
 
 WebFinger must be served on the host of the user address. If `public_url` is not the
 apex of your domain, proxy `https://example.com/.well-known/webfinger` to gopherstorage
@@ -81,6 +84,31 @@ shared documents with copyable links.
 Example: `PUT /storage/alice/public/photos/cat.jpg` is shown at
 `https://share.example.com/view/alice/photos/cat.jpg`.
 
+## Account API
+
+Create a token under "API tokens" on the account page, then:
+
+```sh
+curl -H "Authorization: Bearer gsk_..." https://storage.example.com/api/v1/account
+```
+
+| method and path | |
+| --- | --- |
+| `GET /api/v1/account` | address, storage root, usage, quota |
+| `GET /api/v1/grants` | connected apps |
+| `DELETE /api/v1/grants/{id}` | disconnect an app |
+| `GET /api/v1/shared?limit=n` | documents under `/public/` with their share links |
+| `GET /api/v1/tokens` | your API tokens (`current` marks the one in use) |
+| `DELETE /api/v1/tokens/{id}` | delete an API token |
+| `GET /api/v1/admin/users` | admins: all users |
+| `PUT /api/v1/admin/users/{id}/quota` | admins: `{"quota_bytes": n}`, 0 for the default |
+
+Errors are `{"error": "..."}` with a matching status. API tokens are separate from the
+tokens apps get: they work only on `/api/v1/`, never on `/storage/`, so they cannot
+read or change documents. Use a remoteStorage client such as `rscli` for files. Tokens
+can only be created in the browser, so a leaked token cannot mint new ones. Admin
+rights come from the OIDC groups at the user's last login.
+
 ## Storage
 
 Each document is a row in `meta.db` plus an immutable blob named by a random key.
@@ -99,6 +127,9 @@ together with the blob directory or bucket.
   as in the spec). Plain `http` redirect URIs are only accepted for localhost.
 - The consent form is bound to the user and request with an HMAC, and cross-origin
   POSTs to the UI are rejected.
+- The account UI runs under a CSP with `script-src 'self'` and no `unsafe-eval` or
+  `unsafe-inline`: htmx is configured not to eval, and Alpine is the CSP build.
+  UI actions also require the `HX-Request` header. The JSON API ignores cookies.
 - Run behind TLS. Session cookies are `Secure` when `public_url` is https.
 
 ## Development
@@ -112,3 +143,13 @@ GS_TEST_S3_ACCESS_KEY=... GS_TEST_S3_SECRET_KEY=... go test ./internal/...
 
 `internal/storage` runs the protocol conformance suite from
 `anime.bike/remotestorage/pkg/rsserver/rstest` against SQLite plus each blob backend.
+
+The web UI is in `internal/ui`: [templ](https://templ.guide) components rendered on the
+server, [htmx](https://htmx.org) for actions (each returns the HTML fragment to swap),
+and the CSP build of [Alpine.js](https://alpinejs.dev) for small client state. htmx and
+Alpine are vendored in `internal/ui/static`, so there is no JS build step. After
+editing a `.templ` file, regenerate the Go code (it is committed):
+
+```sh
+go generate ./internal/ui    # runs go tool templ generate
+```

@@ -29,7 +29,7 @@ func runConformance(t *testing.T, svc *storage.Service, maxDoc int64) {
 	h := rstest.NewHarness(t, func(user string) (rsserver.StorageBackend, error) {
 		mu.Lock()
 		defer mu.Unlock()
-		u, err := svc.Meta.UpsertUser(context.Background(), "sub-"+user, user, "")
+		u, err := svc.Meta.UpsertUser(context.Background(), meta.Login{Sub: "sub-" + user, Username: user})
 		if err != nil {
 			return nil, err
 		}

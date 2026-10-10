@@ -110,14 +110,16 @@ type User struct {
 	UsedBytes  int64
 	CreatedAt  time.Time
 	LastLogin  time.Time
+	// IsAdmin reflects the OIDC groups at the last login.
+	IsAdmin bool
 }
 
-const userCols = `id, sub, username, email, quota_bytes, used_bytes, created_at, last_login`
+const userCols = `id, sub, username, email, quota_bytes, used_bytes, created_at, last_login, is_admin`
 
 func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	var u User
 	var created, login int64
-	if err := row.Scan(&u.ID, &u.Sub, &u.Username, &u.Email, &u.QuotaBytes, &u.UsedBytes, &created, &login); err != nil {
+	if err := row.Scan(&u.ID, &u.Sub, &u.Username, &u.Email, &u.QuotaBytes, &u.UsedBytes, &created, &login, &u.IsAdmin); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -130,14 +132,20 @@ func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 // ErrUsernameTaken is returned when another account already uses the username.
 var ErrUsernameTaken = errors.New("username is used by another account")
 
+// Login is what an OIDC login tells us about a user.
+type Login struct {
+	Sub, Username, Email string
+	IsAdmin              bool
+}
+
 // UpsertUser records a login. Accounts are keyed by OIDC subject; the
 // username is updated if it changed and is still free.
-func (s *Store) UpsertUser(ctx context.Context, sub, username, email string) (*User, error) {
+func (s *Store) UpsertUser(ctx context.Context, l Login) (*User, error) {
 	var u *User
 	err := s.write(ctx, func(tx *sql.Tx) error {
 		var owner string
-		err := tx.QueryRowContext(ctx, `SELECT sub FROM users WHERE username = ?`, username).Scan(&owner)
-		if err == nil && owner != sub {
+		err := tx.QueryRowContext(ctx, `SELECT sub FROM users WHERE username = ?`, l.Username).Scan(&owner)
+		if err == nil && owner != l.Sub {
 			return ErrUsernameTaken
 		}
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -145,13 +153,14 @@ func (s *Store) UpsertUser(ctx context.Context, sub, username, email string) (*U
 		}
 		t := now()
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO users (sub, username, email, created_at, last_login) VALUES (?, ?, ?, ?, ?)
-			ON CONFLICT (sub) DO UPDATE SET username = excluded.username, email = excluded.email, last_login = excluded.last_login`,
-			sub, username, email, t, t)
+			INSERT INTO users (sub, username, email, created_at, last_login, is_admin) VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT (sub) DO UPDATE SET username = excluded.username, email = excluded.email,
+				last_login = excluded.last_login, is_admin = excluded.is_admin`,
+			l.Sub, l.Username, l.Email, t, t, l.IsAdmin)
 		if err != nil {
 			return err
 		}
-		u, err = scanUser(tx.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE sub = ?`, sub))
+		u, err = scanUser(tx.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE sub = ?`, l.Sub))
 		return err
 	})
 	return u, err

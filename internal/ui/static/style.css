@@ -39,11 +39,21 @@ button.small { padding: 2px 8px; font-size: 13px; }
 .actions { display: flex; gap: 8px; margin: 20px 0; }
 .address { display: flex; gap: 8px; align-items: center; }
 .address code { font-size: 17px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; flex: 1; overflow-wrap: anywhere; }
-.meter { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; max-width: 360px; }
-#meter-bar { height: 100%; background: var(--accent); }
 .scopes { padding-left: 20px; line-height: 1.8; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 th { color: var(--dim); font-weight: 500; font-size: 13px; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.ops { text-align: right; white-space: nowrap; }
+[x-cloak] { display: none !important; }
+.brand { color: var(--fg); text-decoration: none; }
+input, select { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--fg); }
+select option { background: var(--bg); }
+form.inline { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+#tokens > form.inline { margin-top: 12px; }
+.notice { border: 1px solid var(--accent); border-radius: 6px; padding: 4px 12px 12px; margin: 12px 0; }
+.badge { font-size: 12px; border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; margin-left: 6px; color: var(--dim); }
+progress { width: 100%; max-width: 360px; height: 8px; accent-color: var(--accent); }
+#flash:empty { display: none; }
+#flash { margin-bottom: 12px; }
+.htmx-request button, button.htmx-request { opacity: 0.6; cursor: progress; }

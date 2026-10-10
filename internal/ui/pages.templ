@@ -1,0 +1,331 @@
+package ui
+
+import (
+	"fmt"
+	"time"
+)
+
+templ layout(title, who string) {
+	@page(title, who, true) {
+		{ children... }
+	}
+}
+
+// page is the HTML shell. Pages without scripts (OAuth consent) set scripts=false
+// so they can keep a CSP with no script-src at all.
+templ page(title, who string, scripts bool) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<meta name="htmx-config" content={ htmxConfig }/>
+			<title>{ title }</title>
+			<link rel="stylesheet" href={ Asset("style.css") }/>
+			if scripts {
+				<script src={ Asset("htmx-2.0.11.min.js") } defer></script>
+				<script src={ Asset("app.js") } defer></script>
+				<script src={ Asset("alpine-csp-3.17.4.min.js") } defer></script>
+			}
+		</head>
+		<body>
+			<header>
+				<a class="brand" href="/">gopherstorage</a>
+				if who != "" {
+					<span id="who">{ who }<a href="/auth/logout">Sign out</a></span>
+				}
+			</header>
+			{ children... }
+		</body>
+	</html>
+}
+
+// htmx must not inject inline styles or eval code, so it works under PageCSP.
+// Error responses are swapped too; the server retargets them to #flash.
+const htmxConfig = `{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false,"selfRequestsOnly":true,` +
+	`"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"[45]..","swap":true,"error":true}]}`
+
+templ LoginPage() {
+	@page("gopherstorage", "", false) {
+		<main class="narrow">
+			<h1>Your remoteStorage server</h1>
+			<p>Sign in to get your storage address and manage the apps that can use it.</p>
+			<a class="button primary" href="/auth/login">Sign in</a>
+		</main>
+	}
+}
+
+templ MessagePage(title, msg string) {
+	@page(title, "", false) {
+		<main class="narrow">
+			<h1>{ title }</h1>
+			if msg != "" {
+				<p>{ msg }</p>
+			}
+		</main>
+	}
+}
+
+templ AccountPage(a Account) {
+	@layout("gopherstorage", a.Name) {
+		<main>
+			<div id="flash" role="alert"></div>
+			<h2>Your storage address</h2>
+			<p class="dim">Enter this in any <a href="https://remotestorage.io/apps/" rel="noopener">remoteStorage app</a> to connect it.</p>
+			<div class="address">
+				<code>{ a.Address }</code>
+				@copyButton("Copy", a.Address)
+			</div>
+			<h2>Usage</h2>
+			<p>
+				{ Size(a.UsedBytes) } in { fmt.Sprint(a.Documents) } { plural(a.Documents, "document", "documents") }
+				if a.Quota > 0 {
+					of { Size(a.Quota) }
+				}
+			</p>
+			if a.Quota > 0 {
+				<progress max="100" value={ percent(a.UsedBytes, a.Quota) }></progress>
+			}
+			@AppsSection(a.Grants)
+			@SharedSection(a.Shared)
+			@TokensSection(a.Tokens)
+			if a.Admin {
+				@UsersSection(a.Users)
+			}
+		</main>
+	}
+}
+
+templ copyButton(label, text string) {
+	<button type="button" class="small" x-data="copy" data-copy={ text } x-on:click="copy" x-text="label">{ label }</button>
+}
+
+templ AppsSection(grants []Grant) {
+	<section id="apps">
+		<h2>Connected apps</h2>
+		if len(grants) == 0 {
+			<p class="dim">No apps connected yet.</p>
+		} else {
+			<table>
+				<thead><tr><th>App</th><th>Access</th><th>Last used</th><th></th></tr></thead>
+				<tbody>
+					for _, g := range grants {
+						<tr>
+							<td><div>{ g.Client }</div><div class="dim small">{ g.Origin }</div></td>
+							<td>{ scopeText(g.Scope) }</td>
+							<td>@timeOrNever(g.LastUsed)</td>
+							<td class="ops">
+								<button
+									type="button"
+									class="small danger"
+									hx-delete={ fmt.Sprintf("/ui/grants/%d", g.ID) }
+									hx-confirm={ "Disconnect " + g.Client + "? It will lose access to your storage." }
+									hx-target="#apps"
+									hx-swap="outerHTML"
+								>Disconnect</button>
+							</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		}
+	</section>
+}
+
+templ SharedSection(files []Shared) {
+	<section id="shared">
+		<h2>Shared files</h2>
+		<p class="dim">Documents that apps put in your <code>public</code> folder. Anyone with the link can open them.</p>
+		if len(files) == 0 {
+			<p class="dim">Nothing shared yet.</p>
+		} else {
+			<table>
+				<thead><tr><th>File</th><th class="num">Size</th><th>Modified</th><th></th></tr></thead>
+				<tbody>
+					for _, f := range files {
+						<tr>
+							<td>
+								<a href={ templ.SafeURL(f.URL) } target="_blank" rel="noopener">{ f.Path[len("/public/"):] }</a>
+								<div class="dim small">{ f.ContentType }</div>
+							</td>
+							<td class="num">{ Size(f.Size) }</td>
+							<td>@timestamp(f.Modified)</td>
+							<td class="ops">@copyButton("Copy link", f.URL)</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		}
+	</section>
+}
+
+templ TokensSection(t Tokens) {
+	<section id="tokens">
+		<h2>API tokens</h2>
+		<p class="dim">
+			For scripts and command-line tools using the account API at <code>{ t.APIURL }</code>.
+			A token can see your account, apps, shared files and tokens, and revoke them. It cannot read your files
+			and cannot create new tokens.
+		</p>
+		if t.New != "" {
+			<div class="notice">
+				<p>New token <strong>{ t.NewFor }</strong>. Copy it now, it will not be shown again.</p>
+				<div class="address"><code id="new-token">{ t.New }</code>@copyButton("Copy", t.New)</div>
+			</div>
+		}
+		if len(t.List) > 0 {
+			<table>
+				<thead><tr><th>Name</th><th>Created</th><th>Last used</th><th>Expires</th><th></th></tr></thead>
+				<tbody>
+					for _, k := range t.List {
+						<tr>
+							<td>{ k.Name }</td>
+							<td>@timestamp(k.Created)</td>
+							<td>@timeOrNever(k.LastUsed)</td>
+							<td>
+								if k.Expires.IsZero() {
+									never
+								} else {
+									@timestamp(k.Expires)
+								}
+							</td>
+							<td class="ops">
+								<button
+									type="button"
+									class="small danger"
+									hx-delete={ fmt.Sprintf("/ui/tokens/%d", k.ID) }
+									hx-confirm={ "Delete token " + k.Name + "? Anything using it will stop working." }
+									hx-target="#tokens"
+									hx-swap="outerHTML"
+								>Delete</button>
+							</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		}
+		<form class="inline" hx-post="/ui/tokens" hx-target="#tokens" hx-swap="outerHTML">
+			<input name="name" placeholder="Token name, e.g. laptop" required maxlength="100" aria-label="Token name"/>
+			<select name="expires_in_days" aria-label="Expiry">
+				<option value="30">30 days</option>
+				<option value="90" selected>90 days</option>
+				<option value="365">1 year</option>
+				<option value="0">No expiry</option>
+			</select>
+			<button class="primary">Create token</button>
+		</form>
+	</section>
+}
+
+templ UsersSection(u Users) {
+	<section id="users">
+		<h2>Users</h2>
+		<table>
+			<thead><tr><th>User</th><th class="num">Used</th><th class="num">Quota</th><th>Last login</th><th></th></tr></thead>
+			<tbody>
+				for _, x := range u.List {
+					@UserRow(x, u.DefaultQuota)
+				}
+			</tbody>
+		</table>
+	</section>
+}
+
+templ UserRow(x User, defaultQuota int64) {
+	<tr x-data="toggle">
+		<td>
+			{ x.Username }
+			if x.Admin {
+				<span class="badge">admin</span>
+			}
+		</td>
+		<td class="num">{ Size(x.UsedBytes) }</td>
+		<td class="num">
+			if x.QuotaBytes != 0 {
+				{ Size(x.QuotaBytes) }
+			} else if defaultQuota != 0 {
+				{ Size(defaultQuota) } <span class="dim">(default)</span>
+			} else {
+				unlimited
+			}
+		</td>
+		<td>@timestamp(x.LastLogin)</td>
+		<td class="ops">
+			<button type="button" class="small" x-show="!open" x-on:click="toggle">Set quota</button>
+			<form
+				class="inline"
+				x-show="open"
+				x-cloak
+				hx-put={ fmt.Sprintf("/ui/admin/users/%d/quota", x.ID) }
+				hx-target="closest tr"
+				hx-swap="outerHTML"
+			>
+				<input name="quota_mib" value={ MiB(x.QuotaBytes) } inputmode="decimal" size="8" placeholder="default" aria-label="Quota in MiB"/> MiB
+				<button class="small primary">Save</button>
+				<button type="button" class="small" x-on:click="toggle">Cancel</button>
+			</form>
+		</td>
+	</tr>
+}
+
+templ Flash(msg string) {
+	<p class="error">{ msg }</p>
+}
+
+templ timestamp(t time.Time) {
+	<time datetime={ iso(t) }>{ utc(t) }</time>
+}
+
+templ timeOrNever(t time.Time) {
+	if t.IsZero() {
+		never
+	} else {
+		@timestamp(t)
+	}
+}
+
+templ ConsentPage(c Consent) {
+	@page("Allow access?", "", false) {
+		<main class="narrow">
+			<h1>Allow access to your storage?</h1>
+			<p><strong>{ c.Client }</strong> wants to access the storage of <strong>{ c.User }</strong>.</p>
+			if c.Insecure {
+				<p class="warn">This app is served over plain http.</p>
+			}
+			if c.FullScope {
+				<p class="warn">This app asks for access to <strong>all</strong> your data.</p>
+			}
+			<ul class="scopes">
+				for _, s := range c.Scopes {
+					<li>
+						<code>
+							if s.Module == "*" {
+								everything
+							} else {
+								{ s.Module }
+							}
+						</code>
+						if s.Write {
+							read and write
+						} else {
+							read only
+						}
+					</li>
+				}
+			</ul>
+			<form method="post">
+				for k, vs := range c.Hidden {
+					for _, v := range vs {
+						<input type="hidden" name={ k } value={ v }/>
+					}
+				}
+				<input type="hidden" name="csrf" value={ c.CSRF }/>
+				<div class="actions">
+					<button name="decision" value="allow" class="primary">Allow</button>
+					<button name="decision" value="deny">Deny</button>
+				</div>
+			</form>
+			<p class="dim">You can revoke access later on the <a href="/">account page</a>.</p>
+		</main>
+	}
+}

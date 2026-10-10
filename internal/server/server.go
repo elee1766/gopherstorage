@@ -4,10 +4,8 @@ package server
 
 import (
 	"context"
-	"embed"
 	"encoding/json"
 	"errors"
-	"io/fs"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -24,9 +22,6 @@ import (
 	"github.com/elee1766/gopherstorage/internal/oauth"
 	"github.com/elee1766/gopherstorage/internal/storage"
 )
-
-//go:embed web
-var webFS embed.FS
 
 // StoragePrefix is where user storage roots live: <public_url>/storage/<user>.
 const StoragePrefix = "/storage/"
@@ -111,13 +106,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /auth/callback", s.auth.Callback)
 	mux.HandleFunc("GET /auth/logout", s.auth.Logout)
 	mux.HandleFunc("POST /auth/logout", s.auth.Logout)
-	mux.HandleFunc("GET /api/account", s.handleAccount)
-	mux.HandleFunc("DELETE /api/grants/{id}", s.handleRevoke)
-	mux.HandleFunc("GET /api/admin/users", s.handleAdminUsers)
-	mux.HandleFunc("PUT /api/admin/users/{id}/quota", s.handleSetQuota)
-	mux.HandleFunc("GET /{$}", s.handleIndex)
-	sub, _ := fs.Sub(webFS, "web")
-	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(sub)))
+	s.registerAPI(mux)
+	s.registerUI(mux)
 
 	return logRequests(s.protectUI(s.routeStorage(mux)))
 }
@@ -180,161 +170,6 @@ func (s *Server) webfinger() http.Handler {
 		}, nil
 	}))
 	return wf
-}
-
-func (s *Server) session(w http.ResponseWriter, r *http.Request) *auth.Session {
-	sess := s.auth.Current(r)
-	if sess == nil {
-		jsonError(w, http.StatusUnauthorized, "not signed in")
-	}
-	return sess
-}
-
-type grantView struct {
-	ID       int64     `json:"id"`
-	Client   string    `json:"client"`
-	Origin   string    `json:"origin"`
-	Scope    string    `json:"scope"`
-	Created  time.Time `json:"created"`
-	LastUsed time.Time `json:"last_used,omitzero"`
-}
-
-func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
-	sess := s.session(w, r)
-	if sess == nil {
-		return
-	}
-	ctx := r.Context()
-	u, err := s.store.UserByID(ctx, sess.UserID)
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "account lookup failed")
-		return
-	}
-	docs, _, err := s.store.Usage(ctx, u.ID)
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "usage lookup failed")
-		return
-	}
-	grants, err := s.store.ListGrants(ctx, u.ID)
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "grant lookup failed")
-		return
-	}
-	gv := []grantView{}
-	for _, g := range grants {
-		v := grantView{ID: g.ID, Client: g.ClientName, Origin: g.ClientID, Scope: g.Scope, Created: g.CreatedAt}
-		if g.LastUsedAt.Unix() > 0 {
-			v.LastUsed = g.LastUsedAt
-		}
-		gv = append(gv, v)
-	}
-	quota := u.QuotaBytes
-	if quota == 0 {
-		quota = s.cfg.Storage.DefaultQuotaBytes
-	}
-	pub, err := s.store.ListPublic(ctx, u.ID, 50)
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "shared lookup failed")
-		return
-	}
-	shared := []map[string]any{}
-	for _, n := range pub {
-		ct, _ := viewType(n.ContentType, rs.BaseName(n.Path))
-		shared = append(shared, map[string]any{
-			"path": n.Path, "url": s.ViewURL(u.Username, n.Path), "content_type": ct,
-			"size": n.Size, "modified": n.Modified,
-		})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"username":     u.Username,
-		"name":         sess.Name,
-		"address":      u.Username + "@" + s.cfg.Host(),
-		"storage_root": s.cfg.PublicURL + StoragePrefix + u.Username,
-		"used_bytes":   u.UsedBytes,
-		"quota_bytes":  quota,
-		"documents":    docs,
-		"admin":        sess.Admin,
-		"grants":       gv,
-		"shared":       shared,
-	})
-}
-
-func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
-	sess := s.session(w, r)
-	if sess == nil {
-		return
-	}
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	if err := s.store.RevokeGrant(r.Context(), sess.UserID, id); errors.Is(err, meta.ErrNotFound) {
-		jsonError(w, http.StatusNotFound, "not found")
-		return
-	} else if err != nil {
-		jsonError(w, http.StatusInternalServerError, "revoke failed")
-		return
-	}
-	slog.Info("grant revoked", "user", sess.Username, "grant", id)
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) admin(w http.ResponseWriter, r *http.Request) *auth.Session {
-	sess := s.session(w, r)
-	if sess != nil && !sess.Admin {
-		jsonError(w, http.StatusForbidden, "admins only")
-		return nil
-	}
-	return sess
-}
-
-func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
-	if s.admin(w, r) == nil {
-		return
-	}
-	users, err := s.store.ListUsers(r.Context())
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "list failed")
-		return
-	}
-	out := []map[string]any{}
-	for _, u := range users {
-		out = append(out, map[string]any{
-			"id": u.ID, "username": u.Username, "email": u.Email,
-			"used_bytes": u.UsedBytes, "quota_bytes": u.QuotaBytes, "last_login": u.LastLogin,
-		})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"users": out, "default_quota_bytes": s.cfg.Storage.DefaultQuotaBytes})
-}
-
-func (s *Server) handleSetQuota(w http.ResponseWriter, r *http.Request) {
-	sess := s.admin(w, r)
-	if sess == nil {
-		return
-	}
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	var body struct {
-		QuotaBytes int64 `json:"quota_bytes"`
-	}
-	if err != nil || json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&body) != nil || body.QuotaBytes < 0 {
-		jsonError(w, http.StatusBadRequest, "body must be {\"quota_bytes\": n}")
-		return
-	}
-	if err := s.store.SetQuota(r.Context(), id, body.QuotaBytes); err != nil {
-		jsonError(w, http.StatusInternalServerError, "update failed")
-		return
-	}
-	slog.Info("quota set", "admin", sess.Username, "user", id, "bytes", body.QuotaBytes)
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
-	data, _ := webFS.ReadFile("web/index.html")
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'")
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Write(data)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

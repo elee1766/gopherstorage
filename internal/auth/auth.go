@@ -59,6 +59,30 @@ func New(ctx context.Context, cfg *config.Config, store *meta.Store) (*Authentic
 		EndSession string `json:"end_session_endpoint"`
 	}
 	_ = provider.Claims(&md)
+	a, err := newSessions(cfg, store)
+	if err != nil {
+		return nil, err
+	}
+	a.provider = provider
+	a.verifier = provider.Verifier(&oidc.Config{ClientID: cfg.OIDC.ClientID})
+	a.oauth = oauth2.Config{
+		ClientID:     cfg.OIDC.ClientID,
+		ClientSecret: cfg.OIDC.ClientSecret,
+		Endpoint:     provider.Endpoint(),
+		RedirectURL:  cfg.PublicURL + "/auth/callback",
+		Scopes:       cfg.OIDC.Scopes,
+	}
+	a.endSess = md.EndSession
+	return a, nil
+}
+
+// NewSessionsOnly returns an Authenticator that can read and issue session
+// cookies but cannot log anyone in. It is for tests.
+func NewSessionsOnly(cfg *config.Config, store *meta.Store) (*Authenticator, error) {
+	return newSessions(cfg, store)
+}
+
+func newSessions(cfg *config.Config, store *meta.Store) (*Authenticator, error) {
 	sess, err := newSealer(cfg.Session.Secret, "session")
 	if err != nil {
 		return nil, err
@@ -72,20 +96,19 @@ func New(ctx context.Context, cfg *config.Config, store *meta.Store) (*Authentic
 		publicURL: cfg.PublicURL,
 		maxAge:    cfg.Session.MaxAge,
 		secure:    strings.HasPrefix(cfg.PublicURL, "https://"),
-		provider:  provider,
-		verifier:  provider.Verifier(&oidc.Config{ClientID: cfg.OIDC.ClientID}),
-		oauth: oauth2.Config{
-			ClientID:     cfg.OIDC.ClientID,
-			ClientSecret: cfg.OIDC.ClientSecret,
-			Endpoint:     provider.Endpoint(),
-			RedirectURL:  cfg.PublicURL + "/auth/callback",
-			Scopes:       cfg.OIDC.Scopes,
-		},
-		session: sess,
-		flow:    flow,
-		endSess: md.EndSession,
-		store:   store,
+		session:   sess,
+		flow:      flow,
+		store:     store,
 	}, nil
+}
+
+// SessionCookie returns the cookie for sess, as set after a login.
+func (a *Authenticator) SessionCookie(sess *Session) (*http.Cookie, error) {
+	v, err := a.session.seal(sess, a.maxAge)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Cookie{Name: sessionCookie, Value: v}, nil
 }
 
 type flowState struct {
@@ -261,7 +284,8 @@ func (a *Authenticator) login(ctx context.Context, claims map[string]any) (*Sess
 	if len(a.cfg.AllowedGroups) > 0 && !slices.ContainsFunc(groups, func(g string) bool { return slices.Contains(a.cfg.AllowedGroups, g) }) {
 		return nil, errors.New("you are not in a group that may use this server")
 	}
-	u, err := a.store.UpsertUser(ctx, sub, username, claimString(claims, "email"))
+	admin := a.cfg.IsAdmin(groups)
+	u, err := a.store.UpsertUser(ctx, meta.Login{Sub: sub, Username: username, Email: claimString(claims, "email"), IsAdmin: admin})
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +293,7 @@ func (a *Authenticator) login(ctx context.Context, claims map[string]any) (*Sess
 	if name == "" {
 		name = u.Username
 	}
-	return &Session{UserID: u.ID, Username: u.Username, Name: name, Admin: a.cfg.IsAdmin(groups)}, nil
+	return &Session{UserID: u.ID, Username: u.Username, Name: name, Admin: admin}, nil
 }
 
 // Current returns the session of the request, or nil.

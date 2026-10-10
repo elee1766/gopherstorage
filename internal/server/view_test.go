@@ -27,7 +27,7 @@ func TestView(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := &storage.Service{Meta: store, Blobs: blobs}
-	u, err := store.UpsertUser(ctx, "sub-alice", "alice", "")
+	u, err := store.UpsertUser(ctx, meta.Login{Sub: "sub-alice", Username: "alice"})
 	if err != nil {
 		t.Fatal(err)
 	}
