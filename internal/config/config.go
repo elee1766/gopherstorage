@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"go.yaml.in/yaml/v3"
+	"github.com/goccy/go-yaml"
 )
 
 type Config struct {
@@ -117,10 +117,8 @@ func Parse(raw []byte) (*Config, error) {
 		return nil, err
 	}
 	cfg := &Config{}
-	dec := yaml.NewDecoder(strings.NewReader(expanded))
-	dec.KnownFields(true)
-	if err := dec.Decode(cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+	if err := yaml.UnmarshalWithOptions([]byte(expanded), cfg, yaml.DisallowUnknownField()); err != nil {
+		return nil, fmt.Errorf("parse config:\n%s", yaml.FormatError(err, false, true))
 	}
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {

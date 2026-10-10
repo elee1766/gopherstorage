@@ -8,7 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.9
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.3
 	github.com/coreos/go-oidc/v3 v3.21.0
-	go.yaml.in/yaml/v3 v3.0.5
+	github.com/goccy/go-yaml v1.19.2
 	golang.org/x/oauth2 v0.37.0
 )
 
