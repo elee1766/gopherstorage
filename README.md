@@ -7,11 +7,13 @@ or any other client) keep their data in your server instead of their own.
 
 - Users sign in with OpenID Connect, for example [Pocket ID](https://pocket-id.org).
 - Apps connect with the user's address (`alice@storage.example.com`), are shown a
-  consent page, and get a scoped token. Implicit grant and PKCE code flow are supported.
+  consent page, and get a scoped token. S256 PKCE is the default. Legacy implicit
+  authorization requires `tokens.allow_implicit: true`.
 - Metadata (the document tree, ETags, tokens, quotas) lives in SQLite.
   Document contents go to a local directory or any S3 compatible bucket.
 - The account page shows the storage address, usage, connected apps (which can be
-  disconnected), shared files and API tokens. Admins can set per-user quotas.
+  disconnected), shared files and API tokens. Users can unpublish shared files.
+  Admins can set per-user quotas and disable accounts.
 - A JSON account API (`/api/v1/`) does the same for scripts and CLIs, with personal
   API tokens created on the account page.
 
@@ -29,21 +31,33 @@ Open the server, sign in, copy your address, and enter it in a remoteStorage
 app (for example from <https://remotestorage.io/apps/>).
 
 `gopherstorage -check -config config.yaml` validates a config without starting.
+Public URLs and the OIDC issuer require HTTPS outside loopback. Plain HTTP on a
+non-loopback listener requires the explicit development setting
+`allow_insecure_http: true`. The default listener is `127.0.0.1:8080`.
 
 ## Pocket ID setup
 
 1. In Pocket ID, **OIDC Clients → Add OIDC Client**, name it `gopherstorage`.
 2. Callback URL: `https://storage.example.com/auth/callback` (your `public_url` + `/auth/callback`).
    Logout callback URL (optional): `https://storage.example.com/`.
+   Back-Channel Logout URL: `https://storage.example.com/auth/backchannel-logout`.
 3. Keep it confidential (not public). PKCE can be on.
 4. Put the client ID and secret into `GS_OIDC_CLIENT_ID` and `GS_OIDC_CLIENT_SECRET`,
    and set `oidc.issuer` to the Pocket ID URL.
 5. Optional: create groups such as `storage-users` and `storage-admins` and use them
-   in `allowed_groups` and `admin_groups`.
+   in `allowed_groups` and `admin_groups`. To trigger provider-driven logout when
+   storage access is removed, also enable group restriction on the Pocket ID client
+   and select its allowed access groups. Requesting group claims or setting only
+   the server's `allowed_groups` does not configure that provider restriction.
 
 The username comes from `preferred_username`, lowercased. It must be 1-64 characters of
 `a-z 0-9 . _ -`. Accounts are keyed by the OIDC subject, so renaming a user in Pocket ID
 renames their storage address.
+Browser sessions are stored in SQLite and revoked by logout. Configure back-channel
+logout in Pocket ID so signed subject-level access-revocation notifications also
+revoke local browser sessions, app credentials and API tokens. Local account disable
+revokes all credentials and denies login until an administrator re-enables the account.
+Administrator operations require an OIDC login within the last 15 minutes.
 
 ## Endpoints
 
@@ -52,10 +66,12 @@ renames their storage address.
 | `/.well-known/webfinger` | discovery for `acct:user@host` |
 | `/storage/<user>/...` | the remoteStorage API |
 | `/view/<user>/<path>` | shows `/public/<path>` in browsers, for sharing and embedding |
-| `/oauth/authorize` | app authorization (implicit and PKCE) with a consent page |
+| `/oauth/authorize` | app authorization with S256 PKCE, or explicitly enabled implicit flow |
 | `/oauth/token` | PKCE token endpoint |
 | `/` | account page |
 | `/api/v1/...` | account API for scripts, see below |
+| `POST /auth/logout` | revoke the current browser session |
+| `POST /auth/backchannel-logout` | signed OIDC logout notifications |
 
 WebFinger must be served on the host of the user address. If `public_url` is not the
 apex of your domain, proxy `https://example.com/.well-known/webfinger` to gopherstorage
@@ -69,8 +85,9 @@ remoteStorage model). `/view/` presents those documents for people rather than a
 
 - the stored `Content-Type`, or one derived from the file extension when an app
   stored `application/octet-stream`
-- `Content-Disposition: inline` with the file name for images, audio, video, PDF and
-  text; other types download (`?download` forces a download)
+- `Content-Disposition: inline` for passive images, audio, video and text. Active
+  formats and PDFs download on the account origin by default. A separate view
+  origin allows sandboxed inline rendering (`?download` always forces a download).
 - `Range` requests for seeking in audio and video, `ETag` / `Last-Modified` with 304s
 - CORS and `Cross-Origin-Resource-Policy: cross-origin`, so media can be embedded
   in other sites and read by `fetch`
@@ -79,7 +96,11 @@ remoteStorage model). `/view/` presents those documents for people rather than a
 
 Set `view.url` to a separate host (for example `share.example.com`, pointed at the
 same server) to keep shared files off the account origin. The account page lists
-shared documents with copyable links.
+shared documents with copyable links and an Unpublish action. Unpublishing deletes
+the public document. It cannot withdraw copies that someone already downloaded.
+Disabled accounts are not served through either anonymous public endpoint.
+`view.allow_same_origin: true` explicitly opts into inline active content on the
+account origin, still under the sandbox policy.
 
 Example: `PUT /storage/alice/public/photos/cat.jpg` is shown at
 `https://share.example.com/view/alice/photos/cat.jpg`.
@@ -98,16 +119,22 @@ curl -H "Authorization: Bearer gsk_..." https://storage.example.com/api/v1/accou
 | `GET /api/v1/grants` | connected apps |
 | `DELETE /api/v1/grants/{id}` | disconnect an app |
 | `GET /api/v1/shared?limit=n` | documents under `/public/` with their share links |
+| `DELETE /api/v1/shared?path=/public/...` | unpublish one public document |
 | `GET /api/v1/tokens` | your API tokens (`current` marks the one in use) |
 | `DELETE /api/v1/tokens/{id}` | delete an API token |
 | `GET /api/v1/admin/users` | admins: all users |
 | `PUT /api/v1/admin/users/{id}/quota` | admins: `{"quota_bytes": n}`, 0 for the default |
+| `PUT /api/v1/admin/users/{id}/access` | admins: `{"disabled": true}` to disable, false to re-enable |
+| `DELETE /api/v1/admin/users/{id}/credentials` | admins: revoke all credentials for an account |
+| `DELETE /api/v1/account/credentials` | revoke all your browser, app and API credentials |
 
 Errors are `{"error": "..."}` with a matching status. API tokens are separate from the
 tokens apps get: they work only on `/api/v1/`, never on `/storage/`, so they cannot
-read or change documents. Use a remoteStorage client such as `rscli` for files. Tokens
+read documents or write new contents. They can unpublish public documents through
+the shared-file endpoint. Use a remoteStorage client such as `rscli` for file contents. Tokens
 can only be created in the browser, so a leaked token cannot mint new ones. Admin
-rights come from the OIDC groups at the user's last login.
+rights come from the OIDC groups at the user's last login, with a 15-minute freshness
+requirement for administrative operations.
 
 Grant scopes describe all unexpired app tokens and pending authorization codes,
 not just the latest consent. A narrower new token does not revoke older tokens.
@@ -123,14 +150,22 @@ Blobs from failed or interrupted writes are recorded before upload and removed
 by an hourly collector. Collection claims a pending blob before deletion, and a
 claimed upload cannot publish its metadata.
 
-Uploads have a five-minute body read deadline. Known lengths that exceed the
-user's remaining quota are rejected before staging. Streaming uploads stop at
-the observed quota allowance, including the size of a document being replaced.
-Concurrent in-flight uploads are not reserved against this allowance, so use
-proxy concurrency limits as well as finite document and user quotas.
+Uploads have a five-minute body read deadline and reserve capacity atomically in
+SQLite before staging. Concurrent requests cannot reuse replacement credit for
+the same path. Failed cleanup keeps its reservation until collection succeeds.
+Orphaned replacement/deletion bytes also count against the global staging budget.
+Defaults are 64 MiB per document, 1 GiB per user, eight uploads per user and 2 GiB
+of global staging capacity. Explicit zero document/quota limits remain unlimited,
+but staging and metadata bounds still apply. Nodes, folder children and path
+depth are bounded, including zero-byte documents.
+See [storage limits and recovery](docs/storage-limits.md) for configured defaults,
+upgrade cleanup behavior, and capacity outside the staging budget.
 
-Back up `meta.db` (SQLite online backup, `sqlite3 meta.db .backup`, or Litestream)
-together with the blob directory or bucket.
+Stop the service and run `gopherstorage -config config.yaml -backup /new/snapshot`.
+The command takes the same exclusive data-directory lock as the server, snapshots
+SQLite and copies the exact referenced blobs. The resulting filesystem snapshot
+is portable from either backend. Credentials are excluded by default so restoring
+an older snapshot does not resurrect revoked tokens. See [backup and restore](docs/backup.md).
 
 ## Security notes
 
@@ -145,11 +180,16 @@ repairs, verification and remaining deployment risks.
 - The account UI runs under a CSP with `script-src 'self'` and no `unsafe-eval` or
   `unsafe-inline`: htmx is configured not to eval, and Alpine is the CSP build.
   UI actions also require the `HX-Request` header. The JSON API ignores cookies.
-- Run behind TLS. Session cookies are `Secure` when `public_url` is https.
-- Set finite `max_document_bytes` and quotas for untrusted users. Zero remains
-  unlimited. Apply request rate and concurrency limits at the reverse proxy.
-- OIDC roles refresh at login. IdP offboarding does not automatically revoke
-  local sessions or bearer tokens, so credential revocation is a separate step.
+- Session cookies are `Secure` with HTTPS. Unknown request hosts are rejected.
+- HTTP admission defaults to 128 active requests and 600 requests/minute per peer
+  IP with a burst of 120. Forwarded-IP headers are not trusted. Configure the proxy
+  for per-user limits if many clients share a network peer.
+- S3 and OIDC have bounded downstream operations. Failed S3 uploads are aborted
+  by exact blob key before pending state is discarded.
+- Config files must not be group/world writable. Metadata and blobs are owner-only.
+- Provider notifications require a reachable back-channel URL. A provider outage
+  cannot be repaired by the application. Use local disable for immediate offboarding.
+- See [deployment security](docs/deployment-security.md) for proxy, container and S3 controls.
 
 ## Development
 
@@ -171,4 +211,12 @@ editing a `.templ` file, regenerate the Go code (it is committed):
 
 ```sh
 go generate ./internal/ui    # runs go tool templ generate
+./scripts/supply-chain-check.sh  # verify locked JS bundles and npm advisories
+```
+
+The local module replacement requires the sibling `../remotestorage` checkout.
+Compose supplies it as a named build context. To build directly:
+
+```sh
+docker build --build-context remotestorage=../remotestorage -t gopherstorage .
 ```

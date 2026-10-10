@@ -1,9 +1,19 @@
 services:
   gopherstorage:
-    build: .
+    build:
+      context: .
+      additional_contexts:
+        remotestorage: ../remotestorage
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
     environment:
       GS_OIDC_CLIENT_ID: ${GS_OIDC_CLIENT_ID}
       GS_OIDC_CLIENT_SECRET: ${GS_OIDC_CLIENT_SECRET}

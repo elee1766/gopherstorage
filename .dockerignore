@@ -1,0 +1,17 @@
+.git
+**/.git
+.env
+.env.*
+/config.yaml
+/data/
+/backup/
+/backups/
+/devscratch/
+/bin/
+/build/
+/dist/
+/tmp/
+/gopherstorage
+/gopherstorage-*
+/*.db
+/*.db-*

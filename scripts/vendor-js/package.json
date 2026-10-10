@@ -1,0 +1,10 @@
+{
+  "name": "gopherstorage-vendored-assets",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Pinned source packages for the checked-in browser bundles",
+  "dependencies": {
+    "@alpinejs/csp": "3.17.4",
+    "htmx.org": "2.0.11"
+  }
+}
