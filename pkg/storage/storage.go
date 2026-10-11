@@ -303,6 +303,7 @@ func (u *userStorage) dropBlob(key string) {
 
 // CollectGarbage deletes blobs left behind by failed or interrupted writes.
 // uploadGrace must exceed the longest upload, or in-flight uploads are deleted.
+// A nonpositive grace is only safe while holding the exclusive offline data-directory lock.
 func (s *Service) CollectGarbage(ctx context.Context, uploadGrace time.Duration) (int, error) {
 	total := 0
 	for {

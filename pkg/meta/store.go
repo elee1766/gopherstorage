@@ -24,6 +24,9 @@ var migrations embed.FS
 // ErrNotFound is returned when a row does not exist.
 var ErrNotFound = errors.New("not found")
 
+// ErrReadOnly rejects writes through a store opened with OpenReadOnly.
+var ErrReadOnly = errors.New("metadata store is read-only")
+
 // Store is the metadata store.
 type Store struct {
 	// db is for reads. It allows many connections (WAL readers do not block).
@@ -35,6 +38,11 @@ type Store struct {
 
 // Open opens (creating if needed) the SQLite database at path and applies migrations.
 func Open(ctx context.Context, path string) (*Store, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	path = abs
 	if dir := filepath.Dir(path); dir != "" {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, err
@@ -57,7 +65,8 @@ func Open(ctx context.Context, path string) (*Store, error) {
 			q.Add("_pragma", p)
 		}
 		q.Set("_txlock", txlock)
-		return "file:" + path + "?" + q.Encode()
+		u := url.URL{Scheme: "file", Path: filepath.ToSlash(path), RawQuery: q.Encode()}
+		return u.String()
 	}
 	db, err := sql.Open("sqlite", dsn("deferred"))
 	if err != nil {
@@ -93,11 +102,17 @@ func (s *Store) migrate(ctx context.Context) error {
 }
 
 func (s *Store) Close() error {
+	if s.wdb == nil {
+		return s.db.Close()
+	}
 	return errors.Join(s.db.Close(), s.wdb.Close())
 }
 
 // write runs fn in a write transaction.
 func (s *Store) write(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	if s.wdb == nil {
+		return ErrReadOnly
+	}
 	tx, err := s.wdb.BeginTx(ctx, nil)
 	if err != nil {
 		return err

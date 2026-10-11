@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/elee1766/gopherstorage/pkg/blob/filesystem"
 	"github.com/elee1766/gopherstorage/pkg/blob/s3"
 	"github.com/elee1766/gopherstorage/pkg/config"
+	"github.com/elee1766/gopherstorage/pkg/importer"
 	"github.com/elee1766/gopherstorage/pkg/meta"
 	"github.com/elee1766/gopherstorage/pkg/oauth"
 	"github.com/elee1766/gopherstorage/pkg/server"
@@ -41,12 +43,37 @@ func run() error {
 	check := flag.Bool("check", false, "validate the config and exit")
 	backupDest := flag.String("backup", "", "create an offline snapshot in a new destination directory")
 	includeCredentials := flag.Bool("include-credentials", false, "retain credentials in a backup, allowing them to be restored")
+	importSource := flag.String("import", "", "import an existing directory into a user's storage while the server is stopped")
+	importUser := flag.String("import-user", "", "existing storage username receiving the import")
+	importPrefix := flag.String("import-prefix", "/", "destination folder, for example /archive/")
+	importExisting := flag.String("import-existing", "skip", "existing document policy: skip, error, or replace")
+	importWorkers := flag.Int("import-workers", 0, "parallel uploads, 0 selects up to 4 within the configured upload limit")
+	importDryRun := flag.Bool("import-dry-run", false, "plan the import without writing documents or blobs")
+	importVerbose := flag.Bool("import-verbose", false, "emit a JSON event for every source entry")
+	importAllowPublic := flag.Bool("import-allow-public", false, "allow imported paths under /public/, where anyone can read them")
 	flag.Parse()
+	if flag.NArg() != 0 {
+		return errors.New("unexpected positional arguments; use -import for a source directory")
+	}
+	var importSet, importOptionsSet bool
+	flag.Visit(func(f *flag.Flag) {
+		importSet = importSet || f.Name == "import"
+		importOptionsSet = importOptionsSet || strings.HasPrefix(f.Name, "import-")
+	})
+	if importSet && *importSource == "" {
+		return errors.New("-import requires a source directory")
+	}
+	if importOptionsSet && *importSource == "" {
+		return errors.New("-import-* options require -import")
+	}
 	if *includeCredentials && *backupDest == "" {
 		return errors.New("-include-credentials requires -backup")
 	}
 	if *check && *backupDest != "" {
 		return errors.New("-check and -backup cannot be combined")
+	}
+	if *importSource != "" && (*check || *backupDest != "") {
+		return errors.New("-import cannot be combined with -check or -backup")
 	}
 
 	cfg, err := config.Load(*cfgPath)
@@ -62,6 +89,13 @@ func run() error {
 	defer stop()
 	if *backupDest != "" {
 		return runBackup(ctx, cfg, *backupDest, *includeCredentials)
+	}
+	if *importSource != "" {
+		return runImport(ctx, cfg, importRequest{
+			Source: *importSource, Username: *importUser, Prefix: *importPrefix,
+			Existing: importer.Existing(*importExisting), Workers: *importWorkers,
+			DryRun: *importDryRun, Verbose: *importVerbose, AllowPublic: *importAllowPublic,
+		}, os.Stdout)
 	}
 	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -87,14 +121,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("open blob storage: %w", err)
 	}
-	svc := &storage.Service{
-		Meta: store, Blobs: blobs, DefaultQuota: cfg.Storage.DefaultQuotaBytes,
-		MaxDocumentBytes:     cfg.Storage.MaxDocumentBytes,
-		MaxConcurrentUploads: cfg.Storage.MaxConcurrentUploads,
-		MaxStagingBytes:      cfg.Storage.MaxStagingBytes,
-		MaxNodes:             cfg.Storage.MaxNodes,
-		MaxFolderChildren:    cfg.Storage.MaxFolderChildren,
-	}
+	svc := storageService(cfg, store, blobs)
 
 	a, err := auth.New(initCtx, cfg, store)
 	if err != nil {
@@ -132,6 +159,17 @@ func run() error {
 		return err
 	}
 	return nil
+}
+
+func storageService(cfg *config.Config, store *meta.Store, blobs blob.Store) *storage.Service {
+	return &storage.Service{
+		Meta: store, Blobs: blobs, DefaultQuota: cfg.Storage.DefaultQuotaBytes,
+		MaxDocumentBytes:     cfg.Storage.MaxDocumentBytes,
+		MaxConcurrentUploads: cfg.Storage.MaxConcurrentUploads,
+		MaxStagingBytes:      cfg.Storage.MaxStagingBytes,
+		MaxNodes:             cfg.Storage.MaxNodes,
+		MaxFolderChildren:    cfg.Storage.MaxFolderChildren,
+	}
 }
 
 func openBlobs(ctx context.Context, cfg *config.Config, opts ...blob.Option) (blob.Store, error) {

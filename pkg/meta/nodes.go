@@ -416,15 +416,16 @@ type PendingBlob struct {
 
 // CollectableBlobs returns orphans, and uploads older than uploadGrace
 // (which belong to requests that died), that no node references.
+// A nonpositive grace claims every unreferenced upload and requires an offline caller.
 func (s *Store) CollectableBlobs(ctx context.Context, uploadGrace time.Duration, limit int) ([]PendingBlob, error) {
 	cutoff := time.Now().Add(-uploadGrace).Unix()
 	var out []PendingBlob
 	err := s.write(ctx, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `
 			SELECT p.blob_key, p.reason, p.created_at FROM pending_blobs p
-			WHERE (p.reason IN ('orphan', 'collecting') OR (p.reason = 'upload' AND p.created_at < ?))
+			WHERE (p.reason IN ('orphan', 'collecting') OR (p.reason = 'upload' AND (p.created_at < ? OR ?)))
 			  AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.blob_key = p.blob_key)
-			ORDER BY p.created_at LIMIT ?`, cutoff, limit)
+			ORDER BY p.created_at LIMIT ?`, cutoff, uploadGrace <= 0, limit)
 		if err != nil {
 			return err
 		}

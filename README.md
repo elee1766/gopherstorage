@@ -192,6 +192,21 @@ SQLite and copies the exact referenced blobs. The resulting filesystem snapshot
 is portable from either backend. Credentials are excluded by default so restoring
 an older snapshot does not resurrect revoked tokens. See [backup and restore](docs/backup.md).
 
+## Importing existing files
+
+Stop the daemon, then import a local export into an existing user's account:
+
+```sh
+gopherstorage -config config.yaml -import /srv/migration/alice \
+  -import-user alice -import-prefix /photos/ -import-dry-run
+# Remove -import-dry-run to copy the files.
+```
+
+Files stream through the normal storage layer, with bounded concurrency and the
+same quotas and limits. Existing documents are skipped by default, so interrupted
+runs can be resumed. Replacement and public publication require explicit flags.
+See [bulk import](docs/import.md) for preparation, progress and failure behavior.
+
 ## Security notes
 
 See the [2026-10-10 security audit](docs/security-audit-2026-10-10.md) for findings,

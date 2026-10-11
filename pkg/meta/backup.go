@@ -42,6 +42,9 @@ func (s *Store) BlobRefs(ctx context.Context) ([]BlobRef, error) {
 // Unless includeCredentials is true, persisted bearer credentials, sessions,
 // authorization codes, and logout replay records are deleted from the copy.
 func (s *Store) Snapshot(ctx context.Context, destination string, includeCredentials bool) error {
+	if s.wdb == nil {
+		return ErrReadOnly
+	}
 	if destination == "" {
 		return fmt.Errorf("snapshot destination is empty")
 	}
