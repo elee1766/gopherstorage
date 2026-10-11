@@ -64,6 +64,8 @@ let
         "/srv/../var/lib"
         "/var/lib/%i"
       ];
+  credentialsService = credentialsSystem.config.systemd.services.gopherstorage;
+  environmentService = environmentSystem.config.systemd.services.gopherstorage;
   checked =
     system:
     assert builtins.all (a: a.assertion) system.config.assertions;
@@ -75,10 +77,14 @@ pkgs.runCommand "gopherstorage-nixos-config-check" { } ''
   export CREDENTIALS_DIRECTORY="$TMPDIR/credentials"
   printf '%s' 'test-only-session-secret-at-least-32-characters' > "$CREDENTIALS_DIRECTORY/GS_SESSION_SECRET"
   printf '%s' 'test-only-client-secret' > "$CREDENTIALS_DIRECTORY/GS_OIDC_SECRET"
+  export HOME=${nixpkgs.lib.escapeShellArg credentialsSystem.config.users.users.gopherstorage.home}
+  cd ${nixpkgs.lib.escapeShellArg credentialsService.serviceConfig.WorkingDirectory}
   ${checked credentialsSystem}
 
   export GS_SESSION_SECRET='test-only-session-secret-at-least-32-characters'
   export GS_OIDC_SECRET='test-only-client-secret'
+  export HOME=${nixpkgs.lib.escapeShellArg environmentSystem.config.users.users.gopherstorage.home}
+  cd ${nixpkgs.lib.escapeShellArg environmentService.serviceConfig.WorkingDirectory}
   ${checked environmentSystem}
 
   unset GS_SESSION_SECRET

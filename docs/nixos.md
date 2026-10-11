@@ -111,7 +111,10 @@ directories are assigned to the service account with mode 0700.
 For S3, set `settings.storage.backend = "s3"` and configure
 `settings.storage.s3` using the same keys as the YAML example. Reference access
 and secret keys through runtime variables, or use the AWS credential chain.
-Metadata still needs a persistent data directory. Existing state must be owned
+Metadata still needs a persistent data directory. The service account uses
+`/var/empty` as its home and `/` as its working directory, separately from
+storage because the application rejects either location as a data directory.
+Existing state must be owned
 by the configured user before migrating to this service.
 
 ## Secrets

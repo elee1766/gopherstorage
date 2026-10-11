@@ -152,6 +152,7 @@ in
                 "/usr"
                 "/usr/local"
                 "/var"
+                "/var/empty"
                 "/var/lib"
                 "/var/log"
                 "/var/cache"
@@ -237,7 +238,7 @@ in
     users.users.${cfg.user} = {
       isSystemUser = true;
       group = cfg.group;
-      home = dataDir;
+      home = "/var/empty";
       createHome = false;
       description = "gopherstorage service user";
     };
@@ -261,7 +262,7 @@ in
         Type = "simple";
         User = cfg.user;
         Group = cfg.group;
-        WorkingDirectory = dataDir;
+        WorkingDirectory = "/";
         StateDirectory = "gopherstorage";
         StateDirectoryMode = "0700";
         RuntimeDirectory = "gopherstorage";
