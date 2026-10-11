@@ -31,7 +31,7 @@ buildGoModule {
   version = "0-unstable";
   src = combinedSource;
   modRoot = "gopherstorage";
-  vendorHash = "sha256-dX7xcnHKOBteSUBOR8f+g3zSBRypLtwoqCTsnW0Ef3s=";
+  vendorHash = "sha256-xQVFXUOuW2EDtK33j0Fi3dum0kcZQ8VBA+B559L2sVY=";
   subPackages = [ "cmd/gopherstorage" ];
   env.CGO_ENABLED = 0;
   checkPhase = ''

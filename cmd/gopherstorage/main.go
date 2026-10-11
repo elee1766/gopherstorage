@@ -39,7 +39,7 @@ func main() {
 const uploadGrace = 24 * time.Hour
 
 func run() error {
-	cfgPath := flag.String("config", envOr("GOPHERSTORAGE_CONFIG", "config.yaml"), "path to config file")
+	cfgPath := flag.String("config", defaultConfigPath(), "path to config file, empty uses environment only")
 	check := flag.Bool("check", false, "validate the config and exit")
 	importSource := flag.String("import", "", "import an existing directory into a user's storage while the server is stopped")
 	importUser := flag.String("import-user", "", "existing storage username receiving the import")
@@ -207,9 +207,12 @@ func maintenance(ctx context.Context, svc *storage.Service, store *meta.Store) {
 	}
 }
 
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
+func defaultConfigPath() string {
+	if path, ok := os.LookupEnv("GOPHERSTORAGE_CONFIG"); ok {
+		return path
 	}
-	return def
+	if _, err := os.Lstat("config.yaml"); errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	return "config.yaml"
 }

@@ -88,6 +88,10 @@ pkgs.runCommand "gopherstorage-nixos-config-check" { } ''
   ${checked environmentSystem}
 
   unset GS_SESSION_SECRET
+  export GOPHERSTORAGE_SESSION_SECRET='test-only-direct-session-secret-at-least-32-characters'
+  export GOPHERSTORAGE_STORAGE_S3_BUCKET='environment-override'
+  ${checked environmentSystem}
+  unset GOPHERSTORAGE_SESSION_SECRET GOPHERSTORAGE_STORAGE_S3_BUCKET
   if ${checked environmentSystem}; then
     echo 'Missing runtime session secret was accepted' >&2
     exit 1

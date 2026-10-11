@@ -27,6 +27,11 @@ open `/account`, sign in, and enter your storage address in a remoteStorage app.
 `gopherstorage -check -config config.yaml` validates the config without starting
 the server. settings are documented in [config.example.yaml](config.example.yaml).
 
+koanf also loads direct environment keys such as `GOPHERSTORAGE_PUBLIC_URL` and
+`GOPHERSTORAGE_STORAGE_S3_BUCKET`, which override YAML. use `-config ''` for
+environment-only configuration. see [configuration](docs/configuration.md) for
+key names, types and secret references.
+
 HTTPS is required outside loopback unless `allow_insecure_http` is explicitly
 set for development. the default listener is `127.0.0.1:8080`. serve webfinger on
 the host used in storage addresses.
@@ -150,7 +155,7 @@ replacement and public publication require explicit flags. see
 - `pkg/storage` - remoteStorage backend over metadata and blobs
 - `pkg/server` - discovery, storage, sharing and account routes
 - `pkg/ui` - templ components, htmx actions and CSP Alpine.js
-- `pkg/config` - YAML configuration
+- `pkg/config` - koanf configuration from YAML and environment keys
 - `pkg/datalock` - exclusive data-directory lock
 - `pkg/importer` - offline migration
 

@@ -11,6 +11,10 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.3
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/goccy/go-yaml v1.19.2
+	github.com/knadh/koanf/providers/confmap v1.0.1
+	github.com/knadh/koanf/providers/env/v2 v2.0.2
+	github.com/knadh/koanf/providers/rawbytes v1.0.1
+	github.com/knadh/koanf/v2 v2.3.8
 	github.com/pressly/goose/v3 v3.28.0
 	golang.org/x/oauth2 v0.37.0
 	golang.org/x/sys v0.48.0
@@ -40,10 +44,14 @@ require (
 	github.com/fatih/color v1.19.0 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
+	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/knadh/koanf/maps v0.1.2 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mfridman/interpolate v0.0.2 // indirect
+	github.com/mitchellh/copystructure v1.2.0 // indirect
+	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/natefinch/atomic v1.0.1 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect

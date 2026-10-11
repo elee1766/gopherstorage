@@ -1,5 +1,9 @@
-# gopherstorage example config. ${VAR} is replaced from the environment;
-# an unset variable is an error.
+# gopherstorage example config. koanf loads YAML and GOPHERSTORAGE_* overrides.
+# A field like storage.s3.bucket maps to GOPHERSTORAGE_STORAGE_S3_BUCKET.
+# Durations use Go syntax (5m), lists use JSON arrays (["storage-admins"]).
+# ${VAR} in YAML strings is replaced literally from the environment;
+# an unset referenced variable is an error unless its field is overridden.
+# See docs/configuration.md for precedence and environment-only operation.
 
 listen: ":8080"
 # The example binds inside a container behind a trusted HTTPS proxy.

@@ -144,6 +144,11 @@ Missing referenced variables fail the pre-start configuration check. The module
 does not automatically restart the service when the contents of a secret file
 change, so restart it after rotating credentials.
 
+Direct `GOPHERSTORAGE_` environment keys also override generated YAML. Keep
+`data_dir` and `storage.path` in `settings`, rather than overriding their paths
+through the environment, so the module creates and permits the right writable
+directories. See [configuration](configuration.md) for key names and types.
+
 Gopherstorage does not provide backup or restore support. Use an operator-managed
 backup process appropriate to the storage backend and coordinate it with the
 service to obtain a consistent snapshot. For imports, stop the systemd service

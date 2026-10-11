@@ -9,12 +9,16 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/goccy/go-yaml"
+	"github.com/knadh/koanf/providers/confmap"
+	"github.com/knadh/koanf/providers/rawbytes"
+	"github.com/knadh/koanf/v2"
 )
 
 type Config struct {
@@ -124,30 +128,133 @@ type Tokens struct {
 
 var envRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
-// expandEnv replaces ${VAR} references outside comment lines. ${VAR} with VAR unset is an error.
-func expandEnv(s string) (string, error) {
-	var missing []string
-	lines := strings.Split(s, "\n")
-	for i, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+var configDefaults = map[string]any{
+	"oidc":    map[string]any{"scopes": []string{"openid", "profile", "email", "groups"}},
+	"session": map[string]any{"max_age": 12 * time.Hour},
+	"storage": map[string]any{
+		"max_document_bytes":     int64(64 << 20),
+		"default_quota_bytes":    int64(1 << 30),
+		"max_concurrent_uploads": 8,
+		"max_staging_bytes":      int64(2 << 30),
+		"max_nodes":              int64(100000),
+		"max_folder_children":    10000,
+	},
+	"tokens": map[string]any{"ttl": 90 * 24 * time.Hour},
+	"http": map[string]any{
+		"max_concurrent_requests": 128,
+		"rate_per_minute":         600,
+		"rate_burst":              120,
+		"max_rate_clients":        10000,
+		"request_timeout":         5 * time.Minute,
+	},
+}
+
+type configYAMLParser struct{}
+
+func (configYAMLParser) Unmarshal(raw []byte) (map[string]any, error) {
+	values := make(map[string]any)
+	if err := yaml.Unmarshal(raw, &values); err != nil {
+		return nil, errors.New("invalid YAML")
+	}
+	if err := validateYAMLKeys(values, reflect.TypeOf(Config{}), ""); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+func (configYAMLParser) Marshal(values map[string]any) ([]byte, error) {
+	return yaml.Marshal(values)
+}
+
+func validateYAMLKeys(values map[string]any, typ reflect.Type, prefix string) error {
+	fields := make(map[string]reflect.Type, typ.NumField())
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		name := strings.Split(f.Tag.Get("yaml"), ",")[0]
+		if name != "" && name != "-" {
+			fields[name] = f.Type
+		}
+	}
+	for name, value := range values {
+		fieldType, ok := fields[name]
+		path := name
+		if prefix != "" {
+			path = prefix + "." + name
+		}
+		if !ok {
+			return fmt.Errorf("unknown config key %q", path)
+		}
+		if value == nil {
+			return fmt.Errorf("config key %q must not be null", path)
+		}
+		if fieldType.Kind() != reflect.Struct || fieldType == reflect.TypeOf(time.Duration(0)) {
 			continue
 		}
-		lines[i] = envRef.ReplaceAllStringFunc(line, func(m string) string {
-			name := envRef.FindStringSubmatch(m)[1]
-			v, ok := os.LookupEnv(name)
-			if !ok {
-				missing = append(missing, name)
+		nested, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("config key %q must be a mapping", path)
+		}
+		if err := validateYAMLKeys(nested, fieldType, path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func expandConfigValues(k *koanf.Koanf, overridden map[string]struct{}) error {
+	var missing []string
+	var expand func(any) any
+	expand = func(value any) any {
+		switch value := value.(type) {
+		case []any:
+			for i := range value {
+				value[i] = expand(value[i])
 			}
-			return v
-		})
+			return value
+		case []string:
+			for i := range value {
+				value[i] = expand(value[i]).(string)
+			}
+			return value
+		case string:
+			return envRef.ReplaceAllStringFunc(value, func(match string) string {
+				name := envRef.FindStringSubmatch(match)[1]
+				replacement, ok := os.LookupEnv(name)
+				if !ok {
+					missing = append(missing, name)
+				}
+				return replacement
+			})
+		default:
+			return value
+		}
 	}
-	if len(missing) > 0 {
-		return "", fmt.Errorf("unset environment variables: %s", strings.Join(missing, ", "))
+	for _, key := range k.Keys() {
+		if _, skip := overridden[key]; skip {
+			continue
+		}
+		value := k.Get(key)
+		switch value.(type) {
+		case string, []string, []any:
+		default:
+			continue
+		}
+		if err := k.Set(key, expand(value)); err != nil {
+			return fmt.Errorf("expand config value for %s: %w", key, err)
+		}
 	}
-	return strings.Join(lines, "\n"), nil
+	if len(missing) != 0 {
+		slices.Sort(missing)
+		missing = slices.Compact(missing)
+		return fmt.Errorf("unset environment variables: %s", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 func Load(path string) (*Config, error) {
+	if path == "" {
+		return Parse(nil)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -174,17 +281,29 @@ func Load(path string) (*Config, error) {
 }
 
 func Parse(raw []byte) (*Config, error) {
-	expanded, err := expandEnv(string(raw))
+	k := koanf.New(".")
+	if err := k.Load(confmap.Provider(configDefaults, "."), nil); err != nil {
+		return nil, fmt.Errorf("load config defaults: %w", err)
+	}
+	if len(raw) != 0 {
+		if err := k.Load(rawbytes.Provider(raw), configYAMLParser{}); err != nil {
+			return nil, fmt.Errorf("parse config: %w", err)
+		}
+	}
+	overridden, err := loadEnvironment(k)
 	if err != nil {
 		return nil, err
 	}
-	// Setting these before decoding preserves an explicit zero as unlimited.
-	cfg := &Config{
-		Storage: Storage{MaxDocumentBytes: 64 << 20, DefaultQuotaBytes: 1 << 30},
-		Tokens:  Tokens{TTL: 90 * 24 * time.Hour},
+	if err := expandConfigValues(k, overridden); err != nil {
+		return nil, err
 	}
-	if err := yaml.UnmarshalWithOptions([]byte(expanded), cfg, yaml.DisallowUnknownField()); err != nil {
-		return nil, fmt.Errorf("parse config:\n%s", yaml.FormatError(err, false, true))
+	encoded, err := k.Marshal(configYAMLParser{})
+	if err != nil {
+		return nil, errors.New("decode config: invalid values")
+	}
+	cfg := new(Config)
+	if err := yaml.UnmarshalWithOptions(encoded, cfg, yaml.DisallowUnknownField()); err != nil {
+		return nil, errors.New("decode config: invalid values")
 	}
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
@@ -209,11 +328,11 @@ func (c *Config) applyDefaults() {
 	if c.OIDC.GroupsClaim == "" {
 		c.OIDC.GroupsClaim = "groups"
 	}
-	if c.Session.MaxAge == 0 {
-		c.Session.MaxAge = 12 * time.Hour
-	}
 	if c.Storage.Backend == "" {
 		c.Storage.Backend = "filesystem"
+	}
+	if c.Session.MaxAge == 0 {
+		c.Session.MaxAge = 12 * time.Hour
 	}
 	if c.Storage.Backend == "filesystem" && c.Storage.Path == "" {
 		c.Storage.Path = c.DataDir + "/blobs"
