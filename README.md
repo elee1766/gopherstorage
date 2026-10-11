@@ -120,6 +120,12 @@ writes stage an immutable blob, then commit the document tree, ETags and quota i
 a SQLite transaction. interrupted uploads and replaced blobs are tracked for
 garbage collection.
 
+`pkg/meta.Store` defines the metadata contract. `pkg/meta/sqlite` is the only
+implementation for now, with `sqlite.Open` and `sqlite.OpenReadOnly` constructors.
+authentication, storage and HTTP handlers accept the interface. another backend
+must preserve atomic upload reservations, conditional writes, garbage-collection
+claims and credential revocation, not just implement individual reads and writes.
+
 uploads reserve capacity before reading the body. defaults are 64 MiB per
 document, 1 GiB per user, eight uploads per user and 2 GiB of global staging.
 metadata and folder listings are bounded too. see
@@ -149,7 +155,8 @@ replacement and public publication require explicit flags. see
 
 - `pkg/auth` - OIDC login, browser sessions and back-channel logout
 - `pkg/oauth` - app consent and scoped remoteStorage credentials
-- `pkg/meta` - SQLite metadata, migrations and capacity reservations
+- `pkg/meta` - metadata interfaces, shared types and errors
+- `pkg/meta/sqlite` - SQLite metadata, migrations and capacity reservations
 - `pkg/blob` - shared blob interface and layout options
 - `pkg/blob/filesystem`, `pkg/blob/s3` - blob backends
 - `pkg/storage` - remoteStorage backend over metadata and blobs

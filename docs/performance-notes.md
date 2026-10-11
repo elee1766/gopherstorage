@@ -8,7 +8,7 @@ claiming a speedup.
 ## 1. Avoid unnecessary grant activity write transactions
 
 `pkg/server/server.go` calls `TouchGrant` on every authenticated storage request.
-`pkg/meta/oauth.go` limits updates to once per minute in SQL, but still opens an
+`pkg/meta/sqlite/oauth.go` limits updates to once per minute in SQL, but still opens an
 immediate write transaction for every call. These transactions share the single
 writer with document publication, upload reservations, and credential changes.
 
