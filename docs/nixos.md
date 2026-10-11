@@ -144,7 +144,9 @@ Missing referenced variables fail the pre-start configuration check. The module
 does not automatically restart the service when the contents of a secret file
 change, so restart it after rotating credentials.
 
-For backups and imports, stop the systemd service first and use an operator
-configuration with access to the same runtime secrets. The application's
-exclusive data-directory lock prevents concurrent offline operations. See
-[backup and restore](backup.md) and [bulk import](import.md).
+Gopherstorage does not provide backup or restore support. Use an operator-managed
+backup process appropriate to the storage backend and coordinate it with the
+service to obtain a consistent snapshot. For imports, stop the systemd service
+first and use an operator configuration with access to the same runtime secrets.
+The application's exclusive data-directory lock prevents an import from running
+concurrently with the daemon. See [bulk import](import.md).

@@ -1,5 +1,11 @@
 # Security audit: 2026-10-10
 
+This is a historical record of the 2026-10-10 audit. Built-in backup support
+described in the follow-up was subsequently removed as out of scope. The old
+verification results below are historical evidence, not a description of current
+application features or a backup procedure. Gopherstorage does not currently
+provide backup or restore support.
+
 ## Scope and method
 
 Reviewed `gopherstorage` at `a76bb09` and `anime.bike/remotestorage` at `532de1c`, including the templ/htmx/Alpine UI, account API, OIDC login, OAuth authorization server, remoteStorage handler, CLI, SQLite metadata, filesystem blobs, S3 blobs and garbage collection.
@@ -74,10 +80,10 @@ The follow-up starts from server `e9e75ad` and library `251b2c5`. The original f
 | Implicit OAuth | S256 PKCE is the default. Fragment-based implicit authorization requires an explicit `tokens.allow_implicit` opt-in. Consent identifies the redirect origin as an unverified publisher and explains retained older scopes. Session, grant, token and pending-code counts are bounded transactionally. |
 | Public-content exposure | Active formats and PDFs download on the account origin by default. A separate view origin supports sandboxed inline rendering. Same-origin active rendering requires an explicit opt-in. The UI and account API can unpublish individual public files. |
 | Networking and slow consumers | Global request concurrency, peer-IP rates, bounded rate-key state, request contexts, write/read/header deadlines and header size are enforced. OIDC and S3 use finite downstream operations. S3 collection aborts abandoned multipart uploads for the exact tracked object key without changing shared bucket policies. |
-| Local files and backup consistency | Dedicated data paths, owner-only metadata/blobs and non-writable configuration requirements reduce accidental exposure. Filesystem staging uses the pending blob key, so crash GC can locate partial bytes. A bounded migration cleanup handles aged legacy temporary names. The offline backup command shares an exclusive data-directory lock with the server, snapshots SQLite and copies referenced blobs into an atomically published destination. Credentials are scrubbed from snapshots by default, with secure deletion and compaction of the copied database, to avoid both revocation rollback and recovery from free pages. |
+| Local files and backup consistency | Dedicated data paths, owner-only metadata/blobs and non-writable configuration requirements reduce accidental exposure. Filesystem staging uses the pending blob key, so crash GC can locate partial bytes. A bounded migration cleanup handles aged legacy temporary names. At the time of this audit, the offline backup command shared an exclusive data-directory lock with the server, snapshotted SQLite and copied referenced blobs into an atomically published destination. Credentials were scrubbed from snapshots by default, with secure deletion and compaction of the copied database, to avoid both revocation rollback and recovery from free pages. Built-in backup support was subsequently removed. |
 | Supply-chain gaps | The vendored browser bundles have an exact npm manifest/lockfile, byte comparison against locked tarballs and an advisory scan command. Builder/runtime container references are digest-pinned. Build contexts exclude local secrets, and the runtime drops capabilities, disallows privilege escalation and uses a read-only root filesystem. |
 
-See `docs/storage-limits.md`, `docs/backup.md` and `docs/deployment-security.md` for limits, migration recovery and operation of these controls. Starting an upgraded server invalidates old stateless browser cookies. Existing explicitly configured unlimited quotas, nonexpiring tokens and legacy-flow opt-ins remain operator choices, not hidden defaults.
+See `docs/storage-limits.md` and `docs/deployment-security.md` for limits and operation of these controls. Import guidance is in `docs/import.md`. Starting an upgraded server invalidates old stateless browser cookies. Existing explicitly configured unlimited quotas, nonexpiring tokens and legacy-flow opt-ins remain operator choices, not hidden defaults.
 
 ### Follow-up verification
 

@@ -30,7 +30,7 @@ The Compose bind mount `./data:/var/lib/gopherstorage` contains SQLite metadata 
 
 ## Backups and recovery
 
-Use the offline, lock-protected backup command and follow the procedure in [Backups](backup.md). It snapshots metadata and referenced blob objects; for S3 it streams the objects to the snapshot and needs read access. Keep configuration and secrets separate. By default the backup omits persisted credentials; the optional `-include-credentials` mode changes recovery and exposure risks, as described in the backup guide.
+Gopherstorage does not provide backup or restore commands. Maintain operator-managed backups of metadata, blobs and deployment configuration using procedures appropriate to the selected backend. Plan for a consistent snapshot, restrict access to backup data, and store secrets separately under the operator's secret-management process. Test restoration independently of the application.
 
 ## Vendored JavaScript and supply chain
 

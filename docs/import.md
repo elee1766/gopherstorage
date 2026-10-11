@@ -15,8 +15,10 @@ currently require Linux.
    export or a filesystem snapshot for a complete migration.
 3. Check the user's quota and the configured document, staging, node and folder
    limits. Import does not bypass them. See [storage limits](storage-limits.md).
-4. Stop gopherstorage and make a [backup](backup.md). Import takes the same
-   exclusive data-directory lock as the daemon and backup command.
+4. Make an operator-managed backup using a process appropriate to the storage
+   backend. Gopherstorage does not provide backup or restore support. Stop
+   gopherstorage before importing. Import takes the same exclusive
+   data-directory lock as the daemon.
 
 Use the same configuration and operating-system account as the daemon. The
 command validates configuration but does not contact the OIDC provider or require

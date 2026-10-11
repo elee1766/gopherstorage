@@ -1,6 +1,6 @@
 //go:build !linux
 
-package backup
+package datalock
 
 import "errors"
 

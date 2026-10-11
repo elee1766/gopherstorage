@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/elee1766/gopherstorage/pkg/backup"
 	"github.com/elee1766/gopherstorage/pkg/config"
+	"github.com/elee1766/gopherstorage/pkg/datalock"
 	"github.com/elee1766/gopherstorage/pkg/importer"
 	"github.com/elee1766/gopherstorage/pkg/meta"
 )
@@ -87,7 +87,7 @@ func TestOfflineImportPreflightDryRunAndRecovery(t *testing.T) {
 	if _, err := os.Stat(blobs); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("dry run initialized blob storage: %v", err)
 	}
-	release, err := backup.AcquireDataDirLock(data)
+	release, err := datalock.AcquireDataDirLock(data)
 	if err != nil {
 		t.Fatal(err)
 	}

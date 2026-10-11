@@ -128,22 +128,17 @@ unchanged key, be deterministic and safe for concurrent calls. `tmp/` is reserve
 this is a Go constructor option, not YAML configuration. changing the function
 does not move existing blobs.
 
-stop the daemon before backup or import:
+stop the daemon before an import:
 
 ```sh
-gopherstorage -config config.yaml -backup /new/snapshot
-
 gopherstorage -config config.yaml -import /srv/migration/alice \
   -import-user alice -import-prefix /photos/ -import-dry-run
 ```
 
-backups copy SQLite and the referenced blobs into a portable filesystem snapshot,
-using the default layout. credentials are excluded by default.
-
 imports stream into an existing account through the storage layer. existing
 documents are skipped so runs can resume. remove `-import-dry-run` to copy files.
 replacement and public publication require explicit flags. see
-[backup and restore](docs/backup.md) and [bulk import](docs/import.md).
+[bulk import](docs/import.md).
 
 ## packages
 
@@ -156,7 +151,8 @@ replacement and public publication require explicit flags. see
 - `pkg/server` - discovery, storage, sharing and account routes
 - `pkg/ui` - templ components, htmx actions and CSP Alpine.js
 - `pkg/config` - YAML configuration
-- `pkg/backup`, `pkg/importer` - offline backup and migration
+- `pkg/datalock` - exclusive data-directory lock
+- `pkg/importer` - offline migration
 
 ## development
 

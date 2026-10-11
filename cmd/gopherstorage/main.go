@@ -16,11 +16,11 @@ import (
 	"time"
 
 	"github.com/elee1766/gopherstorage/pkg/auth"
-	"github.com/elee1766/gopherstorage/pkg/backup"
 	"github.com/elee1766/gopherstorage/pkg/blob"
 	"github.com/elee1766/gopherstorage/pkg/blob/filesystem"
 	"github.com/elee1766/gopherstorage/pkg/blob/s3"
 	"github.com/elee1766/gopherstorage/pkg/config"
+	"github.com/elee1766/gopherstorage/pkg/datalock"
 	"github.com/elee1766/gopherstorage/pkg/importer"
 	"github.com/elee1766/gopherstorage/pkg/meta"
 	"github.com/elee1766/gopherstorage/pkg/oauth"
@@ -41,8 +41,6 @@ const uploadGrace = 24 * time.Hour
 func run() error {
 	cfgPath := flag.String("config", envOr("GOPHERSTORAGE_CONFIG", "config.yaml"), "path to config file")
 	check := flag.Bool("check", false, "validate the config and exit")
-	backupDest := flag.String("backup", "", "create an offline snapshot in a new destination directory")
-	includeCredentials := flag.Bool("include-credentials", false, "retain credentials in a backup, allowing them to be restored")
 	importSource := flag.String("import", "", "import an existing directory into a user's storage while the server is stopped")
 	importUser := flag.String("import-user", "", "existing storage username receiving the import")
 	importPrefix := flag.String("import-prefix", "/", "destination folder, for example /archive/")
@@ -66,14 +64,8 @@ func run() error {
 	if importOptionsSet && *importSource == "" {
 		return errors.New("-import-* options require -import")
 	}
-	if *includeCredentials && *backupDest == "" {
-		return errors.New("-include-credentials requires -backup")
-	}
-	if *check && *backupDest != "" {
-		return errors.New("-check and -backup cannot be combined")
-	}
-	if *importSource != "" && (*check || *backupDest != "") {
-		return errors.New("-import cannot be combined with -check or -backup")
+	if *importSource != "" && *check {
+		return errors.New("-import cannot be combined with -check")
 	}
 
 	cfg, err := config.Load(*cfgPath)
@@ -87,9 +79,6 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if *backupDest != "" {
-		return runBackup(ctx, cfg, *backupDest, *includeCredentials)
-	}
 	if *importSource != "" {
 		return runImport(ctx, cfg, importRequest{
 			Source: *importSource, Username: *importUser, Prefix: *importPrefix,
@@ -105,7 +94,7 @@ func run() error {
 	if err := os.Chmod(cfg.DataDir, 0o700); err != nil {
 		return fmt.Errorf("protect data directory: %w", err)
 	}
-	unlock, err := backup.AcquireDataDirLock(cfg.DataDir)
+	unlock, err := datalock.AcquireDataDirLock(cfg.DataDir)
 	if err != nil {
 		return fmt.Errorf("lock data directory: %w", err)
 	}

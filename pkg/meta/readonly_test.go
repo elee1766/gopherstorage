@@ -36,13 +36,6 @@ func TestReadOnlyMetadataCannotCreateOrModifyAccounts(t *testing.T) {
 	if _, err := ro.UpsertUser(ctx, Login{Sub: "new", Username: "bob"}); !errors.Is(err, ErrReadOnly) {
 		t.Fatalf("read-only account creation: %v", err)
 	}
-	snapshot := filepath.Join(t.TempDir(), "snapshot.db")
-	if err := ro.Snapshot(ctx, snapshot, false); !errors.Is(err, ErrReadOnly) {
-		t.Fatalf("read-only snapshot: %v", err)
-	}
-	if _, err := os.Stat(snapshot); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("read-only snapshot created an output: %v", err)
-	}
 	if _, err := ro.db.ExecContext(ctx, `UPDATE users SET quota_bytes=42`); err == nil {
 		t.Fatal("read-only connection accepted a SQL write")
 	}
