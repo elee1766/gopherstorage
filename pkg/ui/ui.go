@@ -78,7 +78,6 @@ type Account struct {
 	Documents int64
 	Admin     bool
 	Grants    []Grant
-	Shared    []Shared
 	Tokens    Tokens
 	Users     Users
 }
@@ -91,12 +90,29 @@ type Grant struct {
 	LastUsed time.Time
 }
 
-type Shared struct {
+type Files struct {
+	Username    string
+	Folder      string
+	Parent      string
+	Breadcrumbs []Breadcrumb
+	Items       []File
+}
+
+type Breadcrumb struct {
+	Name string
+	Path string
+}
+
+type File struct {
 	Path        string
-	URL         string
+	Name        string
+	BrowseURL   string
+	DownloadURL string
+	PublicURL   string
 	ContentType string
 	Size        int64
 	Modified    time.Time
+	Folder      bool
 }
 
 type Token struct {

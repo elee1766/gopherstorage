@@ -5,9 +5,13 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
+	"mime"
 	"net/http"
+	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -28,13 +32,11 @@ import (
 // (Sec-Fetch-Site / Origin) plus the HX-Request header, which a cross-origin
 // form cannot send.
 
-const (
-	sharedOnPage = 50
-)
-
 func (s *Server) registerUI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("GET /account", s.handleAccount)
+	mux.HandleFunc("GET /files", s.handleFiles)
+	mux.HandleFunc("GET /files/download", s.handleFileDownload)
 	mux.HandleFunc("DELETE /ui/grants/{id}", s.uiHandler(false, s.uiRevokeGrant))
 	mux.HandleFunc("POST /ui/unpublish", s.uiHandler(false, s.uiUnpublish))
 	mux.HandleFunc("POST /ui/tokens", s.uiHandler(false, s.uiCreateToken))
@@ -112,6 +114,141 @@ func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
 	render(w, r, http.StatusOK, ui.AccountPage(*a))
 }
 
+func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	sess := s.auth.Current(r)
+	if sess == nil {
+		http.Redirect(w, r, "/auth/login?return=%2Ffiles", http.StatusFound)
+		return
+	}
+	u, err := s.store.UserByID(r.Context(), sess.UserID)
+	if errors.Is(err, meta.ErrNotFound) || (err == nil && u.Disabled) {
+		http.Redirect(w, r, "/auth/login?return=%2Ffiles", http.StatusFound)
+		return
+	}
+	if err != nil {
+		slog.Error("files page user lookup", "err", err)
+		render(w, r, http.StatusInternalServerError, ui.MessagePage("Something went wrong", "Your files could not be loaded."))
+		return
+	}
+	folder := r.URL.Query().Get("path")
+	if folder == "" {
+		folder = "/"
+	}
+	if !canonicalFolder(folder) {
+		http.NotFound(w, r)
+		return
+	}
+	page, err := s.filesView(r, u, folder)
+	if err != nil {
+		if errors.Is(err, meta.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		slog.Error("files page listing", "user", u.Username, "folder", folder, "err", err)
+		render(w, r, http.StatusInternalServerError, ui.MessagePage("Something went wrong", "This folder could not be loaded."))
+		return
+	}
+	render(w, r, http.StatusOK, ui.FilesPage(page))
+}
+
+func (s *Server) filesView(r *http.Request, u *meta.User, folder string) (ui.Files, error) {
+	limit := s.storage.MaxFolderChildren
+	if limit <= 0 {
+		limit = 10_000
+	}
+	node, children, err := s.store.ListFolderLimit(r.Context(), u.ID, folder, limit)
+	if err != nil {
+		return ui.Files{}, err
+	}
+	if folder != "/" && (node == nil || !node.IsFolder) {
+		return ui.Files{}, meta.ErrNotFound
+	}
+	page := ui.Files{Username: u.Username, Folder: folder}
+	if folder != "/" {
+		page.Parent = path.Dir(strings.TrimSuffix(folder, "/"))
+		if page.Parent == "." || page.Parent == "" {
+			page.Parent = "/"
+		} else if page.Parent != "/" {
+			page.Parent += "/"
+		}
+	}
+	for _, segment := range strings.Split(strings.Trim(folder, "/"), "/") {
+		if segment == "" {
+			continue
+		}
+		if len(page.Breadcrumbs) == 0 {
+			folderPath := "/" + segment + "/"
+			page.Breadcrumbs = append(page.Breadcrumbs, ui.Breadcrumb{Name: segment, Path: folderPath})
+		} else {
+			folderPath := strings.TrimSuffix(page.Breadcrumbs[len(page.Breadcrumbs)-1].Path, "/") + "/" + segment + "/"
+			page.Breadcrumbs = append(page.Breadcrumbs, ui.Breadcrumb{Name: segment, Path: folderPath})
+		}
+	}
+	for _, child := range children {
+		item := ui.File{Path: child.Path, Name: path.Base(strings.TrimSuffix(child.Path, "/")), Folder: child.IsFolder, Size: child.Size, ContentType: child.ContentType, Modified: child.Modified}
+		if child.IsFolder {
+			item.BrowseURL = "/files?path=" + url.QueryEscape(child.Path)
+		} else {
+			item.DownloadURL = "/files/download?path=" + url.QueryEscape(child.Path)
+			if strings.HasPrefix(child.Path, "/public/") {
+				item.PublicURL = s.publicDocumentURL(u.Username, child.Path)
+			}
+		}
+		page.Items = append(page.Items, item)
+	}
+	return page, nil
+}
+
+func canonicalFolder(p string) bool {
+	return p == "/" || (strings.HasSuffix(p, "/") && path.Clean(p)+"/" == p && rs.ValidatePath(strings.TrimSuffix(p, "/")) == nil)
+}
+
+func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	sess := s.auth.Current(r)
+	if sess == nil {
+		http.Redirect(w, r, "/auth/login?return=%2Ffiles", http.StatusFound)
+		return
+	}
+	u, err := s.store.UserByID(r.Context(), sess.UserID)
+	if err != nil || u.Disabled {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	filePath := r.URL.Query().Get("path")
+	if !canonicalUserDocument(filePath) {
+		http.NotFound(w, r)
+		return
+	}
+	doc, _, err := s.storage.ForUser(u).Get(r.Context(), filePath)
+	if err != nil {
+		if errors.Is(err, rs.ErrNotFound) || errors.Is(err, meta.ErrNotFound) {
+			http.NotFound(w, r)
+		} else {
+			slog.Error("private file download", "user", u.Username, "path", filePath, "err", err)
+			http.Error(w, "could not download file", http.StatusInternalServerError)
+		}
+		return
+	}
+	defer doc.Body.Close()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": path.Base(filePath)}))
+	w.Header().Set("Content-Security-Policy", "sandbox")
+	w.Header().Set("Content-Length", strconv.FormatInt(doc.Metadata.Size, 10))
+	if r.Method == http.MethodHead {
+		return
+	}
+	if _, err := io.Copy(w, doc.Body); err != nil {
+		slog.Error("private file download stream", "user", u.Username, "path", filePath, "err", err)
+	}
+}
+
+func canonicalUserDocument(p string) bool {
+	return p != "/" && !strings.HasPrefix(p, "/public/") && !strings.HasSuffix(p, "/") && path.Clean(p) == p && rs.ValidatePath(p) == nil && !rs.IsFolderPath(p)
+}
+
 func (s *Server) accountView(r *http.Request, sess *auth.Session) (*ui.Account, error) {
 	ctx := r.Context()
 	u, err := s.store.UserByID(ctx, sess.UserID)
@@ -128,13 +265,6 @@ func (s *Server) accountView(r *http.Request, sess *auth.Session) (*ui.Account, 
 	}
 	if a.Grants, err = s.uiGrants(r, u.ID); err != nil {
 		return nil, err
-	}
-	shared, err := s.shared(r, u, sharedOnPage)
-	if err != nil {
-		return nil, err
-	}
-	for _, f := range shared {
-		a.Shared = append(a.Shared, ui.Shared(f))
 	}
 	if a.Tokens, err = s.uiTokens(r, u.ID); err != nil {
 		return nil, err
@@ -199,16 +329,34 @@ func (s *Server) uiUnpublish(w http.ResponseWriter, r *http.Request, _ *auth.Ses
 		return
 	}
 	slog.Info("shared file unpublished", "user", u.Username, "path", publicPath, "via", "ui")
-	shared, err := s.shared(r, u, sharedOnPage)
+	folder := r.PostFormValue("folder")
+	if !canonicalFolder(folder) {
+		folder = "/"
+	}
+	var page ui.Files
+	var err error
+	for {
+		page, err = s.filesView(r, u, folder)
+		if !errors.Is(err, meta.ErrNotFound) || folder == "/" {
+			break
+		}
+		folder = path.Dir(strings.TrimSuffix(folder, "/"))
+		if folder == "." || folder == "" {
+			folder = "/"
+		} else if folder != "/" {
+			folder += "/"
+		}
+	}
 	if err != nil {
-		flash(w, r, http.StatusInternalServerError, "Could not load shared files.")
+		flash(w, r, http.StatusInternalServerError, "Could not load files.")
 		return
 	}
-	files := make([]ui.Shared, 0, len(shared))
-	for _, f := range shared {
-		files = append(files, ui.Shared(f))
+	if folder == "/" {
+		w.Header().Set("HX-Replace-Url", "/files")
+	} else {
+		w.Header().Set("HX-Replace-Url", "/files?path="+url.QueryEscape(folder))
 	}
-	render(w, r, http.StatusOK, ui.SharedSection(files))
+	render(w, r, http.StatusOK, ui.FilesExplorer(page))
 }
 
 func (s *Server) uiRevokeGrant(w http.ResponseWriter, r *http.Request, _ *auth.Session, u *meta.User) {

@@ -71,9 +71,12 @@ administrator operations require an OIDC login within the last 15 minutes.
 
 ## account
 
-`/account` shows the storage address, usage, connected apps, shared files and API
-tokens. users can disconnect apps and unpublish shared files. administrators can
-set quotas and disable accounts.
+`/account` shows the storage address, usage, connected apps and API tokens.
+users can disconnect apps. administrators can set quotas and disable accounts.
+
+`/files` browses all of your files and folders, including private and public
+files. private downloads require your signed-in session. public files also have
+copy-link and unpublish controls.
 
 apps use S256 PKCE by default. the legacy implicit flow requires
 `tokens.allow_implicit: true`. approving narrower access does not revoke an app's
@@ -104,7 +107,7 @@ public files. use a remoteStorage client for file operations.
 ## public storage
 
 documents under `/public/` are anonymously readable at
-`/storage/<user>/public/<path>`. links in the account UI and API point to that
+`/storage/<user>/public/<path>`. links in the file explorer and API point to that
 remoteStorage endpoint. browser viewing and embedding belong in a separate
 application, not this server.
 

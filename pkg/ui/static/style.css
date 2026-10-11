@@ -140,6 +140,18 @@ button.small {
   overflow-wrap: anywhere;
 }
 
+#files-explorer td:first-child {
+  min-width: 12rem;
+}
+
+.breadcrumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: baseline;
+  margin-block: 1rem;
+}
+
 .scopes {
   padding-left: 1.5rem;
 }

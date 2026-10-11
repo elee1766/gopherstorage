@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"net/url"
 	"time"
 )
 
@@ -33,6 +34,7 @@ templ page(title, who string, scripts bool) {
 				<a class="brand" href="/account">gopherstorage</a>
 				if who != "" {
 					<div id="who">
+						<a href="/files">Files</a>
 						<span>{ who }</span>
 						<form class="inline" action="/auth/logout" method="post" hx-post="/auth/logout">
 							<button type="submit" class="small">Sign out</button>
@@ -77,6 +79,7 @@ templ AccountPage(a Account) {
 		<main>
 			<div id="flash" role="alert"></div>
 			<h1>Account</h1>
+			<p><a href="/files">Browse files</a></p>
 			<h2>Your storage address</h2>
 			<p class="dim">Enter this in any <a href="https://remotestorage.io/apps/" rel="noopener">remoteStorage app</a> to connect it.</p>
 			<div class="address">
@@ -91,7 +94,6 @@ templ AccountPage(a Account) {
 				}
 			</p>
 			@AppsSection(a.Grants)
-			@SharedSection(a.Shared)
 			@TokensSection(a.Tokens)
 			if a.Admin {
 				@UsersSection(a.Users)
@@ -138,31 +140,63 @@ templ AppsSection(grants []Grant) {
 	</section>
 }
 
-templ SharedSection(files []Shared) {
-	<section id="shared">
-		<h2>Shared files</h2>
-		<p class="dim">Documents that apps put in your <code>public</code> folder. Links point to the remoteStorage API and are readable without authentication. Unpublishing removes the server copy, but cannot remove copies others have already downloaded.</p>
-		if len(files) == 0 {
-			<p class="dim">Nothing shared yet.</p>
+templ FilesPage(f Files) {
+	@layout("Files · gopherstorage", f.Username) {
+		<main>
+			<div id="flash" role="alert"></div>
+			<h1>Files</h1>
+			<p class="dim">Your remoteStorage files. Downloads here require your signed-in session. Files in <code>public</code> have links anyone can open.</p>
+			@FilesExplorer(f)
+		</main>
+	}
+}
+
+templ FilesExplorer(f Files) {
+	<section id="files-explorer">
+		<nav aria-label="Folder path" class="breadcrumbs">
+			<a href="/files">All files</a>
+			for _, crumb := range f.Breadcrumbs {
+				<span aria-hidden="true">/</span>
+				<a href={ templ.SafeURL("/files?path=" + url.QueryEscape(crumb.Path)) }>{ crumb.Name }</a>
+			}
+		</nav>
+		if f.Parent != "" {
+			if f.Parent == "/" {
+				<p><a href="/files">↑ Parent folder</a></p>
+			} else {
+				<p><a href={ templ.SafeURL("/files?path=" + url.QueryEscape(f.Parent)) }>↑ Parent folder</a></p>
+			}
+		}
+		if len(f.Items) == 0 {
+			<p class="dim">This folder is empty.</p>
 		} else {
-			<div class="table-scroll" role="region" aria-label="Shared files" tabindex="0">
+			<div class="table-scroll" role="region" aria-label="Files" tabindex="0">
 				<table>
-					<thead><tr><th>File</th><th class="num">Size</th><th>Modified</th><th></th></tr></thead>
+					<thead><tr><th>Name</th><th>Type</th><th class="num">Size</th><th>Modified</th><th></th></tr></thead>
 					<tbody>
-						for _, f := range files {
+						for _, item := range f.Items {
 							<tr>
 								<td>
-									<a href={ templ.SafeURL(f.URL) } target="_blank" rel="noopener">{ f.Path[len("/public/"):] }</a>
-									<div class="dim small">{ f.ContentType }</div>
+									if item.Folder {
+									<a href={ templ.SafeURL(item.BrowseURL) }>{ item.Name }/</a>
+									} else if item.PublicURL != "" {
+									<a href={ templ.SafeURL(item.PublicURL) } target="_blank" rel="noopener">{ item.Name }</a>
+								} else {
+									<a href={ templ.SafeURL(item.DownloadURL) }>{ item.Name }</a>
+								}
 								</td>
-								<td class="num">{ Size(f.Size) }</td>
-								<td>@timestamp(f.Modified)</td>
+								<td>{ item.ContentType }</td>
+								<td class="num">{ Size(item.Size) }</td>
+								<td>@timestamp(item.Modified)</td>
 								<td class="ops">
-									@copyButton("Copy link", f.URL)
-									<form class="inline" hx-post="/ui/unpublish" hx-target="#shared" hx-swap="outerHTML" hx-confirm={ "Unpublish " + f.Path + "? This deletes the server copy and stops this link from working. It cannot remove copies already downloaded." }>
-										<input type="hidden" name="path" value={ f.Path }/>
+									if item.PublicURL != "" {
+										@copyButton("Copy link", item.PublicURL)
+										<form class="inline" hx-post="/ui/unpublish" hx-target="#files-explorer" hx-swap="outerHTML" hx-confirm={ "Unpublish " + item.Path + "? This deletes the server copy and stops this link from working. It cannot remove copies already downloaded." }>
+											<input type="hidden" name="path" value={ item.Path }/>
+										<input type="hidden" name="folder" value={ f.Folder }/>
 										<button type="submit" class="small danger">Unpublish</button>
 									</form>
+									}
 								</td>
 							</tr>
 						}
