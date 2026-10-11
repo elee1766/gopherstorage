@@ -1,264 +1,181 @@
 # gopherstorage
 
-A [remoteStorage](https://remotestorage.io) server
-([draft-dejong-remotestorage-27](https://datatracker.ietf.org/doc/draft-dejong-remotestorage/)).
-remoteStorage apps (built with [remoteStorage.js](https://remotestoragejs.readthedocs.io)
-or any other client) keep their data in your server instead of their own.
+this is a self-hosted [remoteStorage](https://remotestorage.io) server, built on
+[anime.bike/remotestorage](https://github.com/elee1766/remotestorage).
 
-- Users sign in with OpenID Connect, for example [Pocket ID](https://pocket-id.org).
-- Apps connect with the user's address (`alice@storage.example.com`), are shown a
-  consent page, and get a scoped token. S256 PKCE is the default. Legacy implicit
-  authorization requires `tokens.allow_implicit: true`.
-- Metadata (the document tree, ETags, tokens, quotas) lives in SQLite.
-  Document contents go to a local directory or any S3 compatible bucket.
-- The account page shows the storage address, usage, connected apps (which can be
-  disconnected), shared files and API tokens. Users can unpublish shared files.
-  Admins can set per-user quotas and disable accounts.
-- A JSON account API (`/api/v1/`) does the same for scripts and CLIs, with personal
-  API tokens created on the account page.
+targets draft-dejong-remotestorage-27, including the optional PKCE auth code flow.
 
-The protocol layer is [anime.bike/remotestorage](https://github.com/elee1766/remotestorage).
+users sign in with OpenID Connect. apps connect using a storage address like
+`alice@storage.example.com` and get access to the modules the user approves.
+metadata lives in SQLite, and document contents go to the filesystem or an S3
+compatible bucket.
 
-## Quick start
+## running
 
 ```sh
-cp config.example.yaml config.yaml   # edit it
-export GS_OIDC_CLIENT_ID=... GS_OIDC_CLIENT_SECRET=... GS_SESSION_SECRET=$(openssl rand -hex 32)
+cp config.example.yaml config.yaml
+# edit the public URL, OIDC issuer and storage settings
+export GS_OIDC_CLIENT_ID=... GS_OIDC_CLIENT_SECRET=...
+export GS_SESSION_SECRET=$(openssl rand -hex 32)
 go run ./cmd/gopherstorage -config config.yaml
 ```
 
-Open `/account` on the server, sign in, copy your address, and enter it in a
-remoteStorage app (for example from <https://remotestorage.io/apps/>).
+keep the session secret across restarts. the local module replacement requires a
+sibling `../remotestorage` checkout.
 
-`gopherstorage -check -config config.yaml` validates a config without starting.
-Public URLs and the OIDC issuer require HTTPS outside loopback. Plain HTTP on a
-non-loopback listener requires the explicit development setting
-`allow_insecure_http: true`. The default listener is `127.0.0.1:8080`.
+open `/account`, sign in, and enter your storage address in a remoteStorage app.
+`gopherstorage -check -config config.yaml` validates the config without starting
+the server. settings are documented in [config.example.yaml](config.example.yaml).
 
-## Pocket ID setup
+HTTPS is required outside loopback unless `allow_insecure_http` is explicitly
+set for development. the default listener is `127.0.0.1:8080`. serve webfinger on
+the host used in storage addresses.
 
-1. In Pocket ID, **OIDC Clients → Add OIDC Client**, name it `gopherstorage`.
-2. Callback URL: `https://storage.example.com/auth/callback` (your `public_url` + `/auth/callback`).
-   Logout callback URL (optional): `https://storage.example.com/`.
-   Back-Channel Logout URL: `https://storage.example.com/auth/backchannel-logout`.
-3. Keep it confidential (not public). PKCE can be on.
-4. Put the client ID and secret into `GS_OIDC_CLIENT_ID` and `GS_OIDC_CLIENT_SECRET`,
-   and set `oidc.issuer` to the Pocket ID URL.
-5. Optional: create groups such as `storage-users` and `storage-admins` and use them
-   in `allowed_groups` and `admin_groups`. To trigger provider-driven logout when
-   storage access is removed, also enable group restriction on the Pocket ID client
-   and select its allowed access groups. Requesting group claims or setting only
-   the server's `allowed_groups` does not configure that provider restriction.
+for Nix builds, run `nix build .#gopherstorage`. the flake also provides a NixOS
+module with `services.gopherstorage.settings` and runtime secret files. see
+[Nix and NixOS](docs/nixos.md).
 
-The username comes from `preferred_username`, lowercased. It must be 1-64 characters of
-`a-z 0-9 . _ -`. Accounts are keyed by the OIDC subject, so renaming a user in Pocket ID
-renames their storage address.
-Browser sessions are stored in SQLite and revoked by logout. Configure back-channel
-logout in Pocket ID so signed subject-level access-revocation notifications also
-revoke local browser sessions, app credentials and API tokens. Local account disable
-revokes all credentials and denies login until an administrator re-enables the account.
-Administrator operations require an OIDC login within the last 15 minutes.
+for containers, compose supplies the sibling library as a named build context.
+to build directly:
 
-## Endpoints
+```sh
+docker build --build-context remotestorage=../remotestorage -t gopherstorage .
+```
 
-| path | purpose |
-| --- | --- |
-| `/.well-known/webfinger` | discovery for `acct:user@host` |
-| `/storage/<user>/...` | the remoteStorage API |
-| `/view/<user>/<path>` | shows `/public/<path>` in browsers, for sharing and embedding |
-| `/oauth/authorize` | app authorization with S256 PKCE, or explicitly enabled implicit flow |
-| `/oauth/token` | PKCE token endpoint |
-| `/` | plain-text landing page with the account URL |
-| `/account` | account and administrator console |
-| `/api/v1/...` | account API for scripts, see below |
-| `POST /auth/logout` | revoke the current browser session |
-| `POST /auth/backchannel-logout` | signed OIDC logout notifications |
+## oidc
 
-WebFinger must be served on the host of the user address. If `public_url` is not the
-apex of your domain, proxy `https://example.com/.well-known/webfinger` to gopherstorage
-and keep `public_url` matching that host, or use a dedicated host such as
-`storage.example.com` for both.
+[Pocket ID](https://pocket-id.org) works as the login provider. create a
+confidential OIDC client with these URLs, using your `public_url`:
 
-## Sharing
+- callback: `https://storage.example.com/auth/callback`
+- logout callback: `https://storage.example.com/`
+- back-channel logout: `https://storage.example.com/auth/backchannel-logout`
 
-Anything an app stores under `/public/` can be read by anyone (that is the
-remoteStorage model). `/view/` presents those documents for people rather than apps:
+set `oidc.issuer` and supply the client ID and secret through the environment.
+`allowed_groups` limits who can log in, and `admin_groups` selects administrators.
+for Pocket ID to send logout notifications when access is removed, also enable
+group restriction on the client and select its allowed groups.
 
-- the stored `Content-Type`, or one derived from the file extension when an app
-  stored `application/octet-stream`
-- `Content-Disposition: inline` for passive images, audio, video and text. Active
-  formats and PDFs download on the account origin by default. A separate view
-  origin allows sandboxed inline rendering (`?download` always forces a download).
-- `Range` requests for seeking in audio and video, `ETag` / `Last-Modified` with 304s
-- CORS and `Cross-Origin-Resource-Policy: cross-origin`, so media can be embedded
-  in other sites and read by `fetch`
-- HTML and SVG render inside a CSP `sandbox` (no scripts, opaque origin), and all
-  responses send `X-Content-Type-Options: nosniff`
+accounts are keyed by OIDC subject. storage names come from `preferred_username`,
+lowercased, with 1-64 characters from `a-z 0-9 . _ -`. renaming a user changes
+their storage address.
 
-Set `view.url` to a separate host (for example `share.example.com`, pointed at the
-same server) to keep shared files off the account origin. The account page lists
-shared documents with copyable links and an Unpublish action. Unpublishing deletes
-the public document. It cannot withdraw copies that someone already downloaded.
-Disabled accounts are not served through either anonymous public endpoint.
-`view.allow_same_origin: true` explicitly opts into inline active content on the
-account origin, still under the sandbox policy.
+local logout revokes the browser session. subject-level back-channel logout and
+account disable revoke browser sessions, app credentials and personal API tokens.
+administrator operations require an OIDC login within the last 15 minutes.
 
-Example: `PUT /storage/alice/public/photos/cat.jpg` is shown at
-`https://share.example.com/view/alice/photos/cat.jpg`.
+## account
 
-## Account API
+`/account` shows the storage address, usage, connected apps, shared files and API
+tokens. users can disconnect apps and unpublish shared files. administrators can
+set quotas and disable accounts.
 
-Create a token under "API tokens" on the account page, then:
+apps use S256 PKCE by default. the legacy implicit flow requires
+`tokens.allow_implicit: true`. approving narrower access does not revoke an app's
+older tokens. disconnecting the app revokes its tokens and pending codes.
+
+`/api/v1/` provides account operations for scripts. create a personal API token
+on the account page:
 
 ```sh
 curl -H "Authorization: Bearer gsk_..." https://storage.example.com/api/v1/account
 ```
 
-| method and path | |
-| --- | --- |
-| `GET /api/v1/account` | address, storage root, usage, quota |
-| `GET /api/v1/grants` | connected apps |
-| `DELETE /api/v1/grants/{id}` | disconnect an app |
-| `GET /api/v1/shared?limit=n` | documents under `/public/` with their share links |
-| `DELETE /api/v1/shared?path=/public/...` | unpublish one public document |
-| `GET /api/v1/tokens` | your API tokens (`current` marks the one in use) |
-| `DELETE /api/v1/tokens/{id}` | delete an API token |
-| `GET /api/v1/admin/users` | admins: all users |
-| `PUT /api/v1/admin/users/{id}/quota` | admins: `{"quota_bytes": n}`, 0 for the default |
-| `PUT /api/v1/admin/users/{id}/access` | admins: `{"disabled": true}` to disable, false to re-enable |
-| `DELETE /api/v1/admin/users/{id}/credentials` | admins: revoke all credentials for an account |
-| `DELETE /api/v1/account/credentials` | revoke all your browser, app and API credentials |
+- `/api/v1/account` - address, usage and quota
+- `/api/v1/grants` - list apps, `DELETE /{id}` to disconnect
+- `/api/v1/shared` - list public files, `DELETE ?path=/public/...` to unpublish
+- `/api/v1/tokens` - list API tokens, `DELETE /{id}` to revoke
+- `/api/v1/admin/users` - list users, `PUT /{id}/quota` or `PUT /{id}/access` to update
+- `DELETE /api/v1/admin/users/{id}/credentials` - revoke a user's credentials
+- `DELETE /api/v1/account/credentials` - revoke your own credentials
 
-Errors are `{"error": "..."}` with a matching status. API tokens are separate from the
-tokens apps get: they work only on `/api/v1/`, never on `/storage/`, so they cannot
-read documents or write new contents. They can unpublish public documents through
-the shared-file endpoint. Use a remoteStorage client such as `rscli` for file contents. Tokens
-can only be created in the browser, so a leaked token cannot mint new ones. Admin
-rights come from the OIDC groups at the user's last login, with a 15-minute freshness
-requirement for administrative operations.
+quota updates accept `{"quota_bytes": n}`, with 0 selecting the default. access
+updates accept `{"disabled": true}` or `false`. errors use `{"error": "..."}`.
 
-Grant scopes describe all unexpired app tokens and pending authorization codes,
-not just the latest consent. A narrower new token does not revoke older tokens.
-Disconnect the app to revoke every token and pending code for that origin.
-Each user may hold at most 50 personal API tokens.
+personal API tokens only work on the account API, not the storage protocol. they
+cannot read or write document contents or create more tokens, but can unpublish
+public files. use a remoteStorage client for file operations.
 
-## Storage
+## sharing
 
-Each document is a row in `meta.db` plus an immutable blob named by a random key.
-Writes upload the blob first, then commit the metadata (conditions, ancestor
-folder ETags, quota) in one SQLite transaction, then delete the replaced blob.
-Blobs from failed or interrupted writes are recorded before upload and removed
-by an hourly collector. Collection claims a pending blob before deletion, and a
-claimed upload cannot publish its metadata.
+documents under `/public/` are anonymously readable. `/view/<user>/<path>` serves
+the corresponding public document for sharing and embedding, with range requests
+and conditional reads.
 
-Uploads have a five-minute body read deadline and reserve capacity atomically in
-SQLite before staging. Concurrent requests cannot reuse replacement credit for
-the same path. Failed cleanup keeps its reservation until collection succeeds.
-Orphaned replacement/deletion bytes also count against the global staging budget.
-Defaults are 64 MiB per document, 1 GiB per user, eight uploads per user and 2 GiB
-of global staging capacity. Explicit zero document/quota limits remain unlimited,
-but staging and metadata bounds still apply. Nodes, folder children and path
-depth are bounded, including zero-byte documents.
-See [storage limits and recovery](docs/storage-limits.md) for configured defaults,
-upgrade cleanup behavior, and capacity outside the staging budget.
+active formats and PDFs download by default on the account origin. set `view.url`
+to a separate host for sandboxed inline rendering. HTML and SVG use a sandbox CSP,
+and responses use `nosniff`. `?download` forces a download.
 
-### Blob backends and layouts
+unpublishing deletes the public document, not copies someone already downloaded.
+disabled accounts lose anonymous public access as well.
 
-`pkg/blob` defines the shared storage interface and construction options. The
-implementations live in `pkg/blob/filesystem` and `pkg/blob/s3`, so consumers can
-import one backend without importing the other. Build tags are not required today.
+## storage
 
-Both constructors accept `blob.WithSharder(func(string) string)`:
+writes stage an immutable blob, then commit the document tree, ETags and quota in
+a SQLite transaction. interrupted uploads and replaced blobs are tracked for
+garbage collection.
 
-```go
-layout := blob.WithSharder(func(key string) string {
-	return key[:3] + "/" + key
-})
-files, err := filesystem.New("/var/lib/gopherstorage/blobs", layout)
-objects, err := s3.New(ctx, s3.Options{Bucket: "documents"}, layout)
-```
+uploads reserve capacity before reading the body. defaults are 64 MiB per
+document, 1 GiB per user, eight uploads per user and 2 GiB of global staging.
+metadata and folder listings are bounded too. see
+[storage limits](docs/storage-limits.md) for configuration and recovery behavior.
 
-The default remains `ab/cd/<key>`, exposed as `blob.DefaultShard`. A callback
-returns a relative slash-separated path ending in the unchanged blob key. A flat
-layout can return the key itself. Paths must be canonical, and `tmp/` is reserved
-for filesystem upload staging. Callbacks must be deterministic and safe for
-concurrent calls. This is a Go construction option, not executable YAML config.
-Changing the layout does not relocate existing blobs: keep the original function
-or migrate the objects before switching. Backups always use the default layout.
+`pkg/blob` defines the shared storage interface. implementations live in
+`pkg/blob/filesystem` and `pkg/blob/s3`. both constructors accept
+`blob.WithSharder(func(string) string)` to choose a layout. the default is
+`ab/cd/<key>`. callbacks must return canonical relative paths ending in the
+unchanged key, be deterministic and safe for concurrent calls. `tmp/` is reserved.
+this is a Go constructor option, not YAML configuration. changing the function
+does not move existing blobs.
 
-Stop the service and run `gopherstorage -config config.yaml -backup /new/snapshot`.
-The command takes the same exclusive data-directory lock as the server, snapshots
-SQLite and copies the exact referenced blobs. The resulting filesystem snapshot
-is portable from either backend. Credentials are excluded by default so restoring
-an older snapshot does not resurrect revoked tokens. See [backup and restore](docs/backup.md).
-
-## Importing existing files
-
-Stop the daemon, then import a local export into an existing user's account:
+stop the daemon before backup or import:
 
 ```sh
+gopherstorage -config config.yaml -backup /new/snapshot
+
 gopherstorage -config config.yaml -import /srv/migration/alice \
   -import-user alice -import-prefix /photos/ -import-dry-run
-# Remove -import-dry-run to copy the files.
 ```
 
-Files stream through the normal storage layer, with bounded concurrency and the
-same quotas and limits. Existing documents are skipped by default, so interrupted
-runs can be resumed. Replacement and public publication require explicit flags.
-See [bulk import](docs/import.md) for preparation, progress and failure behavior.
+backups copy SQLite and the referenced blobs into a portable filesystem snapshot,
+using the default layout. credentials are excluded by default.
 
-## Security notes
+imports stream into an existing account through the storage layer. existing
+documents are skipped so runs can resume. remove `-import-dry-run` to copy files.
+replacement and public publication require explicit flags. see
+[backup and restore](docs/backup.md) and [bulk import](docs/import.md).
 
-See the [2026-10-10 security audit](docs/security-audit-2026-10-10.md) for findings,
-repairs, verification and remaining deployment risks.
+## packages
 
-- Tokens are random 256-bit values. Only their SHA-256 hash is stored.
-- Apps are identified by the origin of their `redirect_uri` (no client registration,
-  as in the spec). Plain `http` redirect URIs are only accepted for localhost.
-- The consent form is bound to the user and request with an HMAC, and cross-origin
-  POSTs to the UI are rejected.
-- The account UI runs under a CSP with `script-src 'self'` and no `unsafe-eval` or
-  `unsafe-inline`: htmx is configured not to eval, and Alpine is the CSP build.
-  UI actions also require the `HX-Request` header. The JSON API ignores cookies.
-- Session cookies are `Secure` with HTTPS. Unknown request hosts are rejected.
-- HTTP admission defaults to 128 active requests and 600 requests/minute per peer
-  IP with a burst of 120. Forwarded-IP headers are not trusted. Configure the proxy
-  for per-user limits if many clients share a network peer.
-- S3 and OIDC have bounded downstream operations. Failed S3 uploads are aborted
-  by exact blob key before pending state is discarded.
-- Config files must not be group/world writable. Metadata and blobs are owner-only.
-- Provider notifications require a reachable back-channel URL. A provider outage
-  cannot be repaired by the application. Use local disable for immediate offboarding.
-- See [deployment security](docs/deployment-security.md) for proxy, container and S3 controls.
+- `pkg/auth` - OIDC login, browser sessions and back-channel logout
+- `pkg/oauth` - app consent and scoped remoteStorage credentials
+- `pkg/meta` - SQLite metadata, migrations and capacity reservations
+- `pkg/blob` - shared blob interface and layout options
+- `pkg/blob/filesystem`, `pkg/blob/s3` - blob backends
+- `pkg/storage` - remoteStorage backend over metadata and blobs
+- `pkg/server` - discovery, storage, sharing and account routes
+- `pkg/ui` - templ components, htmx actions and CSP Alpine.js
+- `pkg/config` - YAML configuration
+- `pkg/backup`, `pkg/importer` - offline backup and migration
 
-## Development
+## development
 
 ```sh
 go test ./...
-# blob store and full conformance against S3:
+go generate ./pkg/ui
+./scripts/supply-chain-check.sh
+```
+
+templ output is committed. htmx and Alpine are vendored, so there is no JS build
+step. `pkg/storage` runs the library's black-box protocol conformance suite against
+SQLite and the blob backends. to include S3 tests:
+
+```sh
 GS_TEST_S3_ENDPOINT=http://127.0.0.1:8333 GS_TEST_S3_BUCKET=test \
 GS_TEST_S3_ACCESS_KEY=... GS_TEST_S3_SECRET_KEY=... go test ./pkg/...
 ```
 
-`pkg/storage` runs the protocol conformance suite from
-`anime.bike/remotestorage/pkg/rsserver/rstest` against SQLite plus each blob backend.
-See [performance review](docs/performance-notes.md) for candidate improvements and
-the measurements needed before adopting them.
-
-The web UI is in `pkg/ui`: [templ](https://templ.guide) components rendered on the
-server, [htmx](https://htmx.org) for actions (each returns the HTML fragment to swap),
-and the CSP build of [Alpine.js](https://alpinejs.dev) for small client state. htmx and
-Alpine are vendored in `pkg/ui/static`, so there is no JS build step. After
-editing a `.templ` file, regenerate the Go code (it is committed):
-
-```sh
-go generate ./pkg/ui    # runs go tool templ generate
-./scripts/supply-chain-check.sh  # verify locked JS bundles and npm advisories
-```
-
-The local module replacement requires the sibling `../remotestorage` checkout.
-Compose supplies it as a named build context. To build directly:
-
-```sh
-docker build --build-context remotestorage=../remotestorage -t gopherstorage .
-```
+see [deployment security](docs/deployment-security.md), the
+[security audit](docs/security-audit-2026-10-10.md) and
+[performance notes](docs/performance-notes.md) for operational constraints and
+verification details.
