@@ -156,8 +156,9 @@ replacement and public publication require explicit flags. see
 - `pkg/server` - discovery, storage, sharing and account routes
 - `pkg/ui` - templ components, htmx actions and CSP Alpine.js
 - `pkg/config` - koanf configuration from YAML and environment keys
-- `pkg/datalock` - exclusive data-directory lock
+- `pkg/gopherstorage` - reusable daemon, configuration check and offline import runner
 - `pkg/importer` - offline migration
+- `cmd/gopherstorage` - signal-aware executable shim
 
 ## development
 

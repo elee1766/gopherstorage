@@ -1,4 +1,4 @@
-package main
+package gopherstorage
 
 import (
 	"context"
@@ -14,7 +14,6 @@ import (
 	"github.com/elee1766/gopherstorage/pkg/auth"
 	"github.com/elee1766/gopherstorage/pkg/blob"
 	"github.com/elee1766/gopherstorage/pkg/config"
-	"github.com/elee1766/gopherstorage/pkg/datalock"
 	"github.com/elee1766/gopherstorage/pkg/importer"
 	"github.com/elee1766/gopherstorage/pkg/meta"
 )
@@ -68,7 +67,7 @@ func runImport(ctx context.Context, cfg *config.Config, req importRequest, outpu
 	if err != nil || !st.Mode().IsRegular() {
 		return fmt.Errorf("import requires an existing regular metadata database at %q; start the server and have the user sign in first", dbPath)
 	}
-	release, err := datalock.AcquireDataDirLock(cfg.DataDir)
+	release, err := acquireDataDirLock(cfg.DataDir)
 	if err != nil {
 		return fmt.Errorf("import requires the server to be stopped: %w", err)
 	}

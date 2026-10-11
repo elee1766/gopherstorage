@@ -1,6 +1,6 @@
 //go:build linux
 
-package main
+package gopherstorage
 
 import (
 	"bytes"
@@ -14,7 +14,6 @@ import (
 	"testing"
 
 	"github.com/elee1766/gopherstorage/pkg/config"
-	"github.com/elee1766/gopherstorage/pkg/datalock"
 	"github.com/elee1766/gopherstorage/pkg/importer"
 	"github.com/elee1766/gopherstorage/pkg/meta"
 )
@@ -87,14 +86,31 @@ func TestOfflineImportPreflightDryRunAndRecovery(t *testing.T) {
 	if _, err := os.Stat(blobs); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("dry run initialized blob storage: %v", err)
 	}
-	release, err := datalock.AcquireDataDirLock(data)
+	lockPath := filepath.Join(data, ".gopherstorage.lock")
+	if err := os.Chmod(lockPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	release, err := acquireDataDirLock(data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := runImport(ctx, cfg, req, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "stopped") {
+	if st, err := os.Stat(lockPath); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("existing lock permissions: %v %v", st, err)
+	}
+	if err := runImport(ctx, cfg, req, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "stopped") || !errors.Is(err, errDataDirLocked) {
 		t.Errorf("import while daemon lock held: %v", err)
 	}
 	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+	if err := release(); err != nil {
+		t.Fatalf("second release: %v", err)
+	}
+	reacquire, err := acquireDataDirLock(data)
+	if err != nil {
+		t.Fatalf("lock after release: %v", err)
+	}
+	if err := reacquire(); err != nil {
 		t.Fatal(err)
 	}
 	for _, username := range []string{"missing", "bob"} {
@@ -134,6 +150,26 @@ func TestOfflineImportPreflightDryRunAndRecovery(t *testing.T) {
 	}
 	if err := json.Unmarshal(output.Bytes(), &summary); err != nil || summary.Skipped != 1 || summary.Imported != 0 {
 		t.Fatalf("resume summary: %s %v", output.String(), err)
+	}
+}
+
+func TestRunUsesLocalFlagSet(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	config := "public_url: http://127.0.0.1:8080\noidc:\n  issuer: http://127.0.0.1:9000\n  client_id: test\nsession:\n  secret: 0123456789abcdef0123456789abcdef\ndata_dir: " + filepath.Join(t.TempDir(), "data") + "\n"
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-config", configPath, "-check"}
+	for range 2 {
+		if err := Run(context.Background(), args); err != nil {
+			t.Fatalf("repeat Run -check: %v", err)
+		}
+	}
+	if err := Run(context.Background(), []string{"-h"}); err != nil {
+		t.Fatalf("Run -h: %v", err)
+	}
+	if err := Run(context.Background(), []string{"-unknown"}); err == nil {
+		t.Fatal("Run accepted an unknown flag")
 	}
 }
 

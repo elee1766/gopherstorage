@@ -11,6 +11,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.3
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/goccy/go-yaml v1.19.2
+	github.com/gofrs/flock v0.13.1
 	github.com/knadh/koanf/providers/confmap v1.0.1
 	github.com/knadh/koanf/providers/env/v2 v2.0.2
 	github.com/knadh/koanf/providers/rawbytes v1.0.1
