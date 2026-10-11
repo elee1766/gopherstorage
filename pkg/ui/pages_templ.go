@@ -709,7 +709,7 @@ func SharedSection(files []Shared) templ.Component {
 			templ_7745c5c3_Var34 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 45, "<section id=\"shared\"><h2>Shared files</h2><p class=\"dim\">Documents that apps put in your <code>public</code> folder. Anyone with the link can open them. Unpublishing removes the server copy and link access, but cannot remove copies others have already downloaded.</p>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 45, "<section id=\"shared\"><h2>Shared files</h2><p class=\"dim\">Documents that apps put in your <code>public</code> folder. Links point to the remoteStorage API and are readable without authentication. Unpublishing removes the server copy, but cannot remove copies others have already downloaded.</p>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

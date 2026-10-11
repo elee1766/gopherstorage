@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -55,6 +56,7 @@ func TestUnpublishIsScopedToOwnedPublicDocuments(t *testing.T) {
 	}
 	put(alice, "/public/note.txt", "public")
 	put(alice, "/public/api.txt", "api public")
+	put(alice, "/public/a + % # ü.txt", "escaped public")
 	put(alice, "/private/note.txt", "private")
 	put(other, "/public/note.txt", "other")
 	apiSecret := "gsk_test"
@@ -82,7 +84,34 @@ func TestUnpublishIsScopedToOwnedPublicDocuments(t *testing.T) {
 		return w
 	}
 
-	if w := do("POST", "/ui/unpublish", "path="+url.QueryEscape("/public/note.txt"), true); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "api.txt") || strings.Contains(w.Body.String(), "/view/alice/note.txt") {
+	w := do("GET", "/api/v1/shared", "", false)
+	var response struct {
+		Shared []sharedView `json:"shared"`
+	}
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &response) != nil {
+		t.Fatalf("shared API: %d %s", w.Code, w.Body.String())
+	}
+	var escapedURL string
+	for _, file := range response.Shared {
+		if file.Path == "/public/a + % # ü.txt" {
+			escapedURL = file.URL
+		}
+	}
+	if escapedURL != "http://storage.test/storage/alice/public/a%20+%20%25%20%23%20%C3%BC.txt" {
+		t.Fatalf("public document URL: %q", escapedURL)
+	}
+	public := httptest.NewRecorder()
+	h.ServeHTTP(public, httptest.NewRequest(http.MethodGet, escapedURL, nil))
+	if public.Code != http.StatusOK || public.Body.String() != "escaped public" || public.Header().Get("Content-Type") != "text/plain" {
+		t.Fatalf("anonymous public link: %d %q headers=%v", public.Code, public.Body.String(), public.Header())
+	}
+	removed := httptest.NewRecorder()
+	h.ServeHTTP(removed, httptest.NewRequest(http.MethodGet, "http://storage.test/view/alice/api.txt", nil))
+	if removed.Code != http.StatusNotFound {
+		t.Fatalf("removed view endpoint: %d", removed.Code)
+	}
+
+	if w := do("POST", "/ui/unpublish", "path="+url.QueryEscape("/public/note.txt"), true); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "/storage/alice/public/api.txt") || strings.Contains(w.Body.String(), "/storage/alice/public/note.txt") {
 		t.Fatalf("UI unpublish: %d %s", w.Code, w.Body.String())
 	}
 	if _, _, err := svc.ForUser(alice).Get(ctx, "/public/note.txt"); err == nil {
@@ -101,7 +130,7 @@ func TestUnpublishIsScopedToOwnedPublicDocuments(t *testing.T) {
 			t.Errorf("unpublish path %q status %d, want 400", p, w.Code)
 		}
 	}
-	w := do("DELETE", "/api/v1/shared?path="+url.QueryEscape("/public/api.txt"), "", false)
+	w = do("DELETE", "/api/v1/shared?path="+url.QueryEscape("/public/api.txt"), "", false)
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("API unpublish: %d %s", w.Code, w.Body.String())
 	}

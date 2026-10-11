@@ -45,7 +45,7 @@ func TestConfigDefaultsAndExplicitOptIns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Listen != "127.0.0.1:8080" || cfg.Storage.MaxDocumentBytes != 64<<20 || cfg.Storage.DefaultQuotaBytes != 1<<30 || cfg.Tokens.TTL != 90*24*time.Hour || cfg.Tokens.AllowImplicit || cfg.View.AllowSameOrigin {
+	if cfg.Listen != "127.0.0.1:8080" || cfg.Storage.MaxDocumentBytes != 64<<20 || cfg.Storage.DefaultQuotaBytes != 1<<30 || cfg.Tokens.TTL != 90*24*time.Hour || cfg.Tokens.AllowImplicit {
 		t.Fatalf("unsafe defaults: %+v", cfg)
 	}
 	if cfg.HTTP.MaxConcurrentRequests <= 0 || cfg.HTTP.RequestTimeout <= 0 || cfg.Storage.MaxStagingBytes <= 0 || cfg.Storage.MaxNodes <= 0 {
@@ -57,14 +57,12 @@ func TestConfigDefaultsAndExplicitOptIns(t *testing.T) {
 tokens:
   ttl: 0s
   allow_implicit: true
-view:
-  allow_same_origin: true
 `
 	cfg, err = Parse([]byte(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Storage.MaxDocumentBytes != 0 || cfg.Storage.DefaultQuotaBytes != 0 || cfg.Tokens.TTL != 0 || !cfg.Tokens.AllowImplicit || !cfg.View.AllowSameOrigin {
+	if cfg.Storage.MaxDocumentBytes != 0 || cfg.Storage.DefaultQuotaBytes != 0 || cfg.Tokens.TTL != 0 || !cfg.Tokens.AllowImplicit {
 		t.Fatal("explicit opt-ins were replaced by defaults")
 	}
 }
@@ -92,7 +90,6 @@ func TestParseEnvironmentOverridesYAML(t *testing.T) {
 	t.Setenv("GOPHERSTORAGE_PUBLIC_URL", "https://env.example.com/")
 	t.Setenv("GOPHERSTORAGE_STORAGE_MAX_DOCUMENT_BYTES", "0")
 	t.Setenv("GOPHERSTORAGE_TOKENS_TTL", "0s")
-	t.Setenv("GOPHERSTORAGE_VIEW_CACHE_MAX_AGE", "0s")
 	t.Setenv("GOPHERSTORAGE_OIDC_ALLOWED_GROUPS", `[]`)
 	t.Setenv("GOPHERSTORAGE_OIDC_ADMIN_GROUPS", `["ops,west","admins"]`)
 	t.Setenv("GOPHERSTORAGE_OIDC_CLIENT_SECRET", `literal:${NOT_A_REFERENCE}/a:b?c=d#e`)
@@ -104,14 +101,12 @@ func TestParseEnvironmentOverridesYAML(t *testing.T) {
   max_document_bytes: 123
 tokens:
   ttl: 24h
-view:
-  cache_max_age: 5m
 `
 	cfg, err := Parse([]byte(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.PublicURL != "https://env.example.com" || cfg.Storage.MaxDocumentBytes != 0 || cfg.Tokens.TTL != 0 || cfg.View.CacheMaxAge != 0 {
+	if cfg.PublicURL != "https://env.example.com" || cfg.Storage.MaxDocumentBytes != 0 || cfg.Tokens.TTL != 0 {
 		t.Fatalf("environment values did not override YAML or preserve zero: %+v", cfg)
 	}
 	if cfg.OIDC.AllowedGroups == nil || len(cfg.OIDC.AllowedGroups) != 0 {
@@ -150,6 +145,7 @@ func TestParseRejectsInvalidAndUnknownEnvironmentValues(t *testing.T) {
 		value string
 	}{
 		{"unknown key", "GOPHERSTORAGE_STORAGE_S3_BUCKET_EXTRA", "bad"},
+		{"removed view setting", "GOPHERSTORAGE_VIEW_URL", "https://share.example.com"},
 		{"boolean", "GOPHERSTORAGE_ALLOW_INSECURE_HTTP", "sometimes"},
 		{"integer", "GOPHERSTORAGE_STORAGE_MAX_DOCUMENT_BYTES", "many"},
 		{"duration", "GOPHERSTORAGE_TOKENS_TTL", "soon"},
@@ -174,6 +170,7 @@ func TestParseRejectsInvalidYAMLValues(t *testing.T) {
 		{"null section", secureConfig + "storage: null\n"},
 		{"wrong boolean type", secureConfig + "allow_insecure_http: perhaps\n"},
 		{"wrong integer type", secureConfig + "storage:\n  max_document_bytes: many\n"},
+		{"removed view section", secureConfig + "view:\n  url: https://share.example.com\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

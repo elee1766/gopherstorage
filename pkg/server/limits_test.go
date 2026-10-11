@@ -21,7 +21,6 @@ import (
 func TestHandlerHostAndSecurityBoundaries(t *testing.T) {
 	cfg := &config.Config{
 		PublicURL: "https://storage.test",
-		View:      config.View{URL: "https://share.test"},
 		Session:   config.Session{Secret: strings.Repeat("s", 32), MaxAge: time.Hour},
 	}
 	h, _, _ := newLimitsTestHandler(t, cfg)
@@ -41,8 +40,8 @@ func TestHandlerHostAndSecurityBoundaries(t *testing.T) {
 	if w := do("storage.test", "/healthz"); w.Code != http.StatusOK || w.Header().Get("Strict-Transport-Security") == "" || w.Header().Get("Cache-Control") != "no-store" {
 		t.Errorf("primary HTTPS health: status=%d headers=%v", w.Code, w.Header())
 	}
-	if w := do("share.test", "/healthz"); w.Code != http.StatusNotFound {
-		t.Errorf("view host served non-view route: %d", w.Code)
+	if w := do("share.test", "/healthz"); w.Code != http.StatusMisdirectedRequest {
+		t.Errorf("secondary host accepted: %d", w.Code)
 	}
 	if w := do("storage.test", "/auth/callback"); w.Code != http.StatusBadRequest || w.Header().Get("Referrer-Policy") != "no-referrer" || w.Header().Get("Cache-Control") != "no-store" {
 		t.Errorf("OAuth callback policy: status=%d headers=%v", w.Code, w.Header())

@@ -67,18 +67,6 @@ tokens:
   # Legacy apps may require the implicit flow. Prefer S256 PKCE.
   allow_implicit: false
 
-view:
-  # /view/<user>/<path> shows /public/<path> in browsers (share links, embeds).
-  # Recommended: a separate host pointed at this server, so shared HTML/SVG can
-  # never touch account cookies. When set, /view/ only answers on this host and
-  # this host serves nothing else. On the account host, active formats and PDFs
-  # download rather than render unless explicitly opted in.
-  # url: https://share.example.com
-  # Let browsers and CDNs reuse responses for this long without revalidating.
-  # 0 = always revalidate (cheap 304s), so edits show up immediately.
-  cache_max_age: 0s
-  allow_same_origin: false
-
 http:
   max_concurrent_requests: 128
   rate_per_minute: 600

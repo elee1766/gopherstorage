@@ -35,7 +35,6 @@ type Config struct {
 	Session Session `yaml:"session"`
 	Storage Storage `yaml:"storage"`
 	Tokens  Tokens  `yaml:"tokens"`
-	View    View    `yaml:"view"`
 	HTTP    HTTP    `yaml:"http"`
 }
 
@@ -46,27 +45,6 @@ type HTTP struct {
 	RateBurst             int           `yaml:"rate_burst"`
 	MaxRateClients        int           `yaml:"max_rate_clients"`
 	RequestTimeout        time.Duration `yaml:"request_timeout"`
-}
-
-// View configures /view/, which shows public documents in browsers.
-type View struct {
-	// URL is an optional separate origin for /view/, e.g. https://share.example.com.
-	// Point it at the same server. When set, /view/ only answers on that host.
-	URL string `yaml:"url"`
-	// AllowSameOrigin permits inline active content on the account origin.
-	AllowSameOrigin bool `yaml:"allow_same_origin"`
-	// CacheMaxAge lets browsers and proxies reuse responses without revalidating.
-	// 0 means they revalidate every time (ETag), so edits show up immediately.
-	CacheMaxAge time.Duration `yaml:"cache_max_age"`
-}
-
-// ViewHost is the host of View.URL, or "" if /view/ is served on every host.
-func (c *Config) ViewHost() string {
-	if c.View.URL == "" {
-		return ""
-	}
-	u, _ := url.Parse(c.View.URL)
-	return u.Host
 }
 
 type OIDC struct {
@@ -365,7 +343,6 @@ func (c *Config) applyDefaults() {
 		c.HTTP.RequestTimeout = 5 * time.Minute
 	}
 	c.PublicURL = strings.TrimRight(c.PublicURL, "/")
-	c.View.URL = strings.TrimRight(c.View.URL, "/")
 }
 
 // Host is the host[:port] of PublicURL, used in user addresses.
@@ -449,20 +426,6 @@ func (c *Config) Validate() error {
 	}
 	if c.HTTP.MaxConcurrentRequests <= 0 || c.HTTP.MaxConcurrentRequests > 4096 || c.HTTP.RatePerMinute <= 0 || c.HTTP.RatePerMinute > 100000 || c.HTTP.RateBurst <= 0 || c.HTTP.RateBurst > 10000 || c.HTTP.MaxRateClients <= 0 || c.HTTP.MaxRateClients > 100000 || c.HTTP.RequestTimeout <= 0 || c.HTTP.RequestTimeout > 5*time.Minute {
 		errs = append(errs, errors.New("http limits must be positive and within 4096 requests, 100000 requests/minute, 10000 burst, 100000 client keys and 5m"))
-	}
-	if c.View.URL != "" {
-		vu, err := url.Parse(c.View.URL)
-		if err != nil || !validOrigin(vu) {
-			errs = append(errs, errors.New("view.url must be an absolute http(s) URL without a path"))
-		} else if u != nil && strings.EqualFold(vu.Host, u.Host) {
-			errs = append(errs, errors.New("view.url must use a different host than public_url (or be left empty)"))
-		}
-		if err == nil && validOrigin(vu) && vu.Scheme == "http" && !loopbackHost(vu.Hostname()) && !c.AllowInsecureHTTP {
-			errs = append(errs, errors.New("view.url must use HTTPS outside loopback"))
-		}
-	}
-	if c.View.CacheMaxAge < 0 {
-		errs = append(errs, errors.New("view.cache_max_age must not be negative"))
 	}
 	return errors.Join(errs...)
 }

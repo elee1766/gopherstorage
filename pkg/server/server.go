@@ -115,19 +115,13 @@ func (s *Server) Handler() http.Handler {
 	return s.requestBoundary(logRequests(s.protectUI(s.routeStorage(mux))))
 }
 
-// routeStorage sends /storage/ and /view/ requests straight to their handlers.
+// routeStorage sends /storage/ requests straight to the remoteStorage handler.
 // http.ServeMux would clean paths like "a//b" or "a/./b" and redirect,
-// instead of letting the handler reject them. When a separate view host is
-// configured, that host serves nothing but /view/.
+// instead of letting the handler reject them.
 func (s *Server) routeStorage(mux http.Handler) http.Handler {
 	storage := http.StripPrefix(strings.TrimSuffix(StoragePrefix, "/"), s.rs)
-	vh := s.cfg.ViewHost()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case strings.HasPrefix(r.URL.Path, ViewPrefix):
-			s.handleView(w, r)
-		case vh != "" && strings.EqualFold(r.Host, vh):
-			http.NotFound(w, r)
 		case strings.HasPrefix(r.URL.Path, StoragePrefix):
 			storage.ServeHTTP(w, r)
 		default:
@@ -146,13 +140,13 @@ func (s *Server) protectUI(next http.Handler) http.Handler {
 	cop.AddInsecureBypassPattern("/.well-known/webfinger")
 	cop.AddInsecureBypassPattern("/auth/backchannel-logout")
 	return cop.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, StoragePrefix) && !strings.HasPrefix(r.URL.Path, ViewPrefix) {
+		if !strings.HasPrefix(r.URL.Path, StoragePrefix) {
 			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		if r.URL.Path == "/auth/callback" {
 			w.Header().Set("Referrer-Policy", "no-referrer")
-		} else if !strings.HasPrefix(r.URL.Path, StoragePrefix) && !strings.HasPrefix(r.URL.Path, ViewPrefix) {
+		} else if !strings.HasPrefix(r.URL.Path, StoragePrefix) {
 			w.Header().Set("Referrer-Policy", "same-origin")
 		}
 		next.ServeHTTP(w, r)

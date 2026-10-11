@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -179,10 +180,18 @@ func (s *Server) shared(r *http.Request, u *meta.User, limit int) ([]sharedView,
 	}
 	out := []sharedView{}
 	for _, n := range pub {
-		ct, _ := viewType(n.ContentType, rs.BaseName(n.Path))
-		out = append(out, sharedView{Path: n.Path, URL: s.ViewURL(u.Username, n.Path), ContentType: ct, Size: n.Size, Modified: n.Modified})
+		out = append(out, sharedView{Path: n.Path, URL: s.publicDocumentURL(u.Username, n.Path), ContentType: n.ContentType, Size: n.Size, Modified: n.Modified})
 	}
 	return out, nil
+}
+
+// publicDocumentURL points at the standard remoteStorage document endpoint.
+func (s *Server) publicDocumentURL(user, publicPath string) string {
+	segments := strings.Split(strings.TrimPrefix(publicPath, "/"), "/")
+	for i, segment := range segments {
+		segments[i] = url.PathEscape(segment)
+	}
+	return s.cfg.PublicURL + StoragePrefix + url.PathEscape(user) + "/" + strings.Join(segments, "/")
 }
 
 func (s *Server) apiShared(w http.ResponseWriter, r *http.Request, p *principal) {

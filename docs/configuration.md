@@ -35,7 +35,6 @@ components with underscores. underscores within field names stay unchanged:
 | `storage.s3.secret_key` | `GOPHERSTORAGE_STORAGE_S3_SECRET_KEY` |
 | `storage.max_document_bytes` | `GOPHERSTORAGE_STORAGE_MAX_DOCUMENT_BYTES` |
 | `tokens.ttl` | `GOPHERSTORAGE_TOKENS_TTL` |
-| `view.url` | `GOPHERSTORAGE_VIEW_URL` |
 | `http.request_timeout` | `GOPHERSTORAGE_HTTP_REQUEST_TIMEOUT` |
 
 all leaf settings in [config.example.yaml](../config.example.yaml) follow this

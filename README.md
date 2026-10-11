@@ -101,15 +101,12 @@ personal API tokens only work on the account API, not the storage protocol. they
 cannot read or write document contents or create more tokens, but can unpublish
 public files. use a remoteStorage client for file operations.
 
-## sharing
+## public storage
 
-documents under `/public/` are anonymously readable. `/view/<user>/<path>` serves
-the corresponding public document for sharing and embedding, with range requests
-and conditional reads.
-
-active formats and PDFs download by default on the account origin. set `view.url`
-to a separate host for sandboxed inline rendering. HTML and SVG use a sandbox CSP,
-and responses use `nosniff`. `?download` forces a download.
+documents under `/public/` are anonymously readable at
+`/storage/<user>/public/<path>`. links in the account UI and API point to that
+remoteStorage endpoint. browser viewing and embedding belong in a separate
+application, not this server.
 
 unpublishing deletes the public document, not copies someone already downloaded.
 disabled accounts lose anonymous public access as well.

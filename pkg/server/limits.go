@@ -127,8 +127,7 @@ func (s *Server) requestBoundary(next http.Handler) http.Handler {
 			http.Error(w, "invalid host", http.StatusBadRequest)
 			return
 		}
-		if !strings.EqualFold(r.Host, s.cfg.Host()) &&
-			(s.cfg.ViewHost() == "" || !strings.EqualFold(r.Host, s.cfg.ViewHost())) {
+		if !strings.EqualFold(r.Host, s.cfg.Host()) {
 			http.Error(w, "misdirected request", http.StatusMisdirectedRequest)
 			return
 		}
@@ -137,10 +136,7 @@ func (s *Server) requestBoundary(next http.Handler) http.Handler {
 }
 
 func (s *Server) httpsConfiguredHost(host string) bool {
-	if strings.HasPrefix(strings.ToLower(s.cfg.PublicURL), "https://") && strings.EqualFold(host, s.cfg.Host()) {
-		return true
-	}
-	return s.cfg.View.URL != "" && strings.HasPrefix(strings.ToLower(s.cfg.View.URL), "https://") && strings.EqualFold(host, s.cfg.ViewHost())
+	return strings.HasPrefix(strings.ToLower(s.cfg.PublicURL), "https://") && strings.EqualFold(host, s.cfg.Host())
 }
 
 func (l *requestLimits) allow(ip string) (time.Duration, bool) {

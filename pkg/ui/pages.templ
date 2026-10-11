@@ -141,7 +141,7 @@ templ AppsSection(grants []Grant) {
 templ SharedSection(files []Shared) {
 	<section id="shared">
 		<h2>Shared files</h2>
-		<p class="dim">Documents that apps put in your <code>public</code> folder. Anyone with the link can open them. Unpublishing removes the server copy and link access, but cannot remove copies others have already downloaded.</p>
+		<p class="dim">Documents that apps put in your <code>public</code> folder. Links point to the remoteStorage API and are readable without authentication. Unpublishing removes the server copy, but cannot remove copies others have already downloaded.</p>
 		if len(files) == 0 {
 			<p class="dim">Nothing shared yet.</p>
 		} else {
