@@ -1,0 +1,45 @@
+{
+  "nodes": {
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1791594108,
+        "narHash": "sha256-XK4KceonkwD8LuMAt/vNrz982mXJM5jeHAxMwsUXXAQ=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "6510408d147d8c5e6d76043e899e9251756f6a75",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "remotestorage": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1791612345,
+        "narHash": "sha256-T1T8XMwAamtxgnio7zYLdV6C/GDcCDnhg5xVY24XrBQ=",
+        "owner": "elee1766",
+        "repo": "remotestorage",
+        "rev": "532de1c3760a7404986779ee35ca1646e481f8c0",
+        "type": "github"
+      },
+      "original": {
+        "owner": "elee1766",
+        "repo": "remotestorage",
+        "rev": "532de1c3760a7404986779ee35ca1646e481f8c0",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "nixpkgs": "nixpkgs",
+        "remotestorage": "remotestorage"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

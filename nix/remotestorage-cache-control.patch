@@ -1,0 +1,25 @@
+diff --git a/pkg/rsserver/handler.go b/pkg/rsserver/handler.go
+index ca7d1bf..bda3396 100644
+--- a/pkg/rsserver/handler.go
++++ b/pkg/rsserver/handler.go
+@@ -111 +111 @@ func cacheControl(ref *ResourceRef) string {
+-	if ref.IsPublic {
++	if ref.IsPublic && !ref.IsFolder() {
+@@ -114 +114 @@ func cacheControl(ref *ResourceRef) string {
+-	return "no-cache"
++	return "private, no-cache"
+diff --git a/pkg/rsserver/rstest/rstest.go b/pkg/rsserver/rstest/rstest.go
+index c09780f..94b6cdf 100644
+--- a/pkg/rsserver/rstest/rstest.go
++++ b/pkg/rsserver/rstest/rstest.go
+@@ -271,2 +271,2 @@ func (c *client) testDocuments(t *testing.T) {
+-	if cc := r.Header.Get("Cache-Control"); !strings.Contains(cc, "no-cache") || strings.Contains(cc, "public") {
+-		t.Fatalf("Cache-Control %q, want no-cache", cc)
++	if cc := r.Header.Get("Cache-Control"); !strings.Contains(cc, "no-cache") || !strings.Contains(cc, "private") || strings.Contains(cc, "public") {
++		t.Fatalf("Cache-Control %q, want private, no-cache", cc)
+@@ -564,0 +565,5 @@ func (c *client) testPublic(t *testing.T) {
++	folder := c.do(t, "GET", c.url("/public/"+c.mod+"/"), c.tok, nil)
++	expect(t, folder, 200, "authenticated public folder GET")
++	if cc := folder.Header.Get("Cache-Control"); !strings.Contains(cc, "private") || !strings.Contains(cc, "no-cache") || strings.Contains(cc, "public") {
++		t.Fatalf("public folder Cache-Control %q, want private, no-cache", cc)
++	}
