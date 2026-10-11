@@ -1,4 +1,4 @@
-package meta
+package sqlite
 
 import (
 	"context"
@@ -11,38 +11,20 @@ import (
 
 	"anime.bike/remotestorage/pkg/rs"
 	"anime.bike/remotestorage/pkg/rsserver"
+	"github.com/elee1766/gopherstorage/pkg/meta"
 )
-
-// Node is a document or a non-empty folder.
-type Node struct {
-	Path        string
-	IsFolder    bool
-	ETag        string
-	ContentType string
-	Size        int64
-	BlobKey     string
-	Modified    time.Time
-}
-
-// Metadata converts a node to the remoteStorage metadata type.
-func (n *Node) Metadata() rs.Metadata {
-	return rs.Metadata{
-		Path: n.Path, Name: rs.BaseName(n.Path), IsFolder: n.IsFolder,
-		ETag: n.ETag, ContentType: n.ContentType, Size: n.Size, LastModified: n.Modified,
-	}
-}
 
 const nodeCols = `path, is_folder, etag, content_type, size, blob_key, modified_at`
 
 type scanner interface{ Scan(...any) error }
 
-func scanNode(row scanner) (*Node, error) {
-	var n Node
+func scanNode(row scanner) (*meta.Node, error) {
+	var n meta.Node
 	var folder int
 	var mod int64
 	if err := row.Scan(&n.Path, &folder, &n.ETag, &n.ContentType, &n.Size, &n.BlobKey, &mod); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
+			return nil, meta.ErrNotFound
 		}
 		return nil, err
 	}
@@ -56,24 +38,24 @@ type querier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
-func getNode(ctx context.Context, q querier, userID int64, path string) (*Node, error) {
+func getNode(ctx context.Context, q querier, userID int64, path string) (*meta.Node, error) {
 	return scanNode(q.QueryRowContext(ctx, `SELECT `+nodeCols+` FROM nodes WHERE user_id = ? AND path = ?`, userID, path))
 }
 
-// GetNode returns a document or folder. Missing items return ErrNotFound.
-func (s *Store) GetNode(ctx context.Context, userID int64, path string) (*Node, error) {
+// GetNode returns a document or folder. Missing items return meta.ErrNotFound.
+func (s *Store) GetNode(ctx context.Context, userID int64, path string) (*meta.Node, error) {
 	return getNode(ctx, s.db, userID, path)
 }
 
 // ListFolder returns the folder node and its direct children, sorted by path.
 // A folder that does not exist returns (nil, nil, nil).
-func (s *Store) ListFolder(ctx context.Context, userID int64, folder string) (*Node, []*Node, error) {
+func (s *Store) ListFolder(ctx context.Context, userID int64, folder string) (*meta.Node, []*meta.Node, error) {
 	return s.ListFolderLimit(ctx, userID, folder, 10_000)
 }
 
 // ListFolderLimit returns at most limit direct children. If more children exist,
 // it returns rs.ErrTooLarge rather than a partial listing.
-func (s *Store) ListFolderLimit(ctx context.Context, userID int64, folder string, limit int) (*Node, []*Node, error) {
+func (s *Store) ListFolderLimit(ctx context.Context, userID int64, folder string, limit int) (*meta.Node, []*meta.Node, error) {
 	if limit <= 0 {
 		limit = 10_000
 	} else if limit > 100_000 {
@@ -86,7 +68,7 @@ func (s *Store) ListFolderLimit(ctx context.Context, userID int64, folder string
 	}
 	defer tx.Rollback()
 	f, err := getNode(ctx, tx, userID, folder)
-	if errors.Is(err, ErrNotFound) {
+	if errors.Is(err, meta.ErrNotFound) {
 		return nil, nil, nil
 	}
 	if err != nil {
@@ -97,7 +79,7 @@ func (s *Store) ListFolderLimit(ctx context.Context, userID int64, folder string
 		return nil, nil, err
 	}
 	defer rows.Close()
-	var children []*Node
+	var children []*meta.Node
 	for rows.Next() {
 		if len(children) == limit {
 			return nil, nil, rs.ErrTooLarge
@@ -112,13 +94,6 @@ func (s *Store) ListFolderLimit(ctx context.Context, userID int64, folder string
 }
 
 func newETag() string {
-	var b [16]byte
-	rand.Read(b[:])
-	return hex.EncodeToString(b[:])
-}
-
-// NewBlobKey returns a fresh random blob key.
-func NewBlobKey() string {
 	var b [16]byte
 	rand.Read(b[:])
 	return hex.EncodeToString(b[:])
@@ -146,7 +121,7 @@ func checkNewNodeChildren(ctx context.Context, tx *sql.Tx, userID int64, path st
 		return nil
 	}
 	for dir := rs.ParentPath(path); dir != ""; dir = rs.ParentPath(dir) {
-		if _, err := getNode(ctx, tx, userID, dir); !errors.Is(err, ErrNotFound) {
+		if _, err := getNode(ctx, tx, userID, dir); !errors.Is(err, meta.ErrNotFound) {
 			if err != nil {
 				return err
 			}
@@ -174,47 +149,24 @@ func touchAncestors(ctx context.Context, tx *sql.Tx, userID int64, path string, 
 	return nil
 }
 
-// PutDocument is the input of PutDocument.
-type PutDocument struct {
-	UserID      int64
-	Path        string
-	ContentType string
-	Size        int64
-	BlobKey     string
-	// ETag of the new version. Content hashes make retries idempotent.
-	ETag              string
-	Cond              rsserver.Condition
-	Quota             int64 // effective quota in bytes, 0 = unlimited
-	MaxNodes          int64
-	MaxFolderChildren int
-}
-
-// PutResult describes a successful PutDocument.
-type PutResult struct {
-	ETag    string
-	Created bool
-	// OldBlobKey is the blob that the document pointed to before, now orphaned.
-	OldBlobKey string
-}
-
-// PutDocument creates or replaces a document, checking conditions, name
+// meta.PutDocument creates or replaces a document, checking conditions, name
 // conflicts and quota, and updates all ancestor folder ETags atomically.
 // The new blob must already be stored and registered with AddPendingBlob.
-func (s *Store) PutDocument(ctx context.Context, in PutDocument) (*PutResult, error) {
+func (s *Store) PutDocument(ctx context.Context, in meta.PutDocument) (*meta.PutResult, error) {
 	if len(in.Path) > 4096 || strings.Count(in.Path, "/") > 65 {
 		return nil, rs.ErrTooLarge
 	}
-	var res PutResult
+	var res meta.PutResult
 	err := s.write(ctx, func(tx *sql.Tx) error {
 		var disabled bool
 		if err := tx.QueryRowContext(ctx, `SELECT disabled FROM users WHERE id = ?`, in.UserID).Scan(&disabled); err != nil {
 			return err
 		}
 		if disabled {
-			return ErrAccountDisabled
+			return meta.ErrAccountDisabled
 		}
 		old, err := getNode(ctx, tx, in.UserID, in.Path)
-		if err != nil && !errors.Is(err, ErrNotFound) {
+		if err != nil && !errors.Is(err, meta.ErrNotFound) {
 			return err
 		}
 		exists := old != nil && !old.IsFolder
@@ -231,7 +183,7 @@ func (s *Store) PutDocument(ctx context.Context, in PutDocument) (*PutResult, er
 		// A folder with this name, or a document on the ancestor path, conflicts.
 		if _, err := getNode(ctx, tx, in.UserID, in.Path+"/"); err == nil {
 			return rs.ErrConflict
-		} else if !errors.Is(err, ErrNotFound) {
+		} else if !errors.Is(err, meta.ErrNotFound) {
 			return err
 		}
 		for dir := rs.ParentPath(in.Path); dir != "/" && dir != ""; dir = rs.ParentPath(dir) {
@@ -239,7 +191,7 @@ func (s *Store) PutDocument(ctx context.Context, in PutDocument) (*PutResult, er
 			if err == nil && !n.IsFolder {
 				return rs.ErrConflict
 			}
-			if err != nil && !errors.Is(err, ErrNotFound) {
+			if err != nil && !errors.Is(err, meta.ErrNotFound) {
 				return err
 			}
 		}
@@ -258,7 +210,7 @@ func (s *Store) PutDocument(ctx context.Context, in PutDocument) (*PutResult, er
 			}
 			missing := int64(0)
 			for dir := rs.ParentPath(in.Path); dir != ""; dir = rs.ParentPath(dir) {
-				if _, err := getNode(ctx, tx, in.UserID, dir); errors.Is(err, ErrNotFound) {
+				if _, err := getNode(ctx, tx, in.UserID, dir); errors.Is(err, meta.ErrNotFound) {
 					missing++
 				} else if err != nil {
 					return err
@@ -330,19 +282,13 @@ func (s *Store) PutDocument(ctx context.Context, in PutDocument) (*PutResult, er
 	return &res, nil
 }
 
-// DeleteResult describes a successful DeleteDocument.
-type DeleteResult struct {
-	ETag    string
-	BlobKey string
-}
-
 // DeleteDocument removes a document, removes folders left empty and updates
 // the ETags of the remaining ancestors.
-func (s *Store) DeleteDocument(ctx context.Context, userID int64, path string, cond rsserver.Condition) (*DeleteResult, error) {
-	var res DeleteResult
+func (s *Store) DeleteDocument(ctx context.Context, userID int64, path string, cond rsserver.Condition) (*meta.DeleteResult, error) {
+	var res meta.DeleteResult
 	err := s.write(ctx, func(tx *sql.Tx) error {
 		old, err := getNode(ctx, tx, userID, path)
-		if err != nil && !errors.Is(err, ErrNotFound) {
+		if err != nil && !errors.Is(err, meta.ErrNotFound) {
 			return err
 		}
 		exists := old != nil && !old.IsFolder
@@ -407,19 +353,12 @@ func (s *Store) AddPendingBlob(ctx context.Context, key string) error {
 	return s.write(ctx, func(tx *sql.Tx) error { return addPending(ctx, tx, key, "upload", -1) })
 }
 
-// PendingBlob is a blob that may need deleting.
-type PendingBlob struct {
-	Key       string
-	Reason    string
-	CreatedAt time.Time
-}
-
 // CollectableBlobs returns orphans, and uploads older than uploadGrace
 // (which belong to requests that died), that no node references.
 // A nonpositive grace claims every unreferenced upload and requires an offline caller.
-func (s *Store) CollectableBlobs(ctx context.Context, uploadGrace time.Duration, limit int) ([]PendingBlob, error) {
+func (s *Store) CollectableBlobs(ctx context.Context, uploadGrace time.Duration, limit int) ([]meta.PendingBlob, error) {
 	cutoff := time.Now().Add(-uploadGrace).Unix()
-	var out []PendingBlob
+	var out []meta.PendingBlob
 	err := s.write(ctx, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `
 			SELECT p.blob_key, p.reason, p.created_at FROM pending_blobs p
@@ -430,7 +369,7 @@ func (s *Store) CollectableBlobs(ctx context.Context, uploadGrace time.Duration,
 			return err
 		}
 		for rows.Next() {
-			var b PendingBlob
+			var b meta.PendingBlob
 			var t int64
 			if err := rows.Scan(&b.Key, &b.Reason, &t); err != nil {
 				rows.Close()
@@ -486,7 +425,7 @@ func (s *Store) Usage(ctx context.Context, userID int64) (docs, bytes int64, err
 }
 
 // ListPublic returns up to limit documents under /public/, newest first.
-func (s *Store) ListPublic(ctx context.Context, userID int64, limit int) ([]*Node, error) {
+func (s *Store) ListPublic(ctx context.Context, userID int64, limit int) ([]*meta.Node, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+nodeCols+` FROM nodes
 		WHERE user_id = ? AND is_folder = 0 AND path >= '/public/' AND path < '/public0'
 		ORDER BY modified_at DESC, path LIMIT ?`, userID, limit)
@@ -494,7 +433,7 @@ func (s *Store) ListPublic(ctx context.Context, userID int64, limit int) ([]*Nod
 		return nil, err
 	}
 	defer rows.Close()
-	var out []*Node
+	var out []*meta.Node
 	for rows.Next() {
 		n, err := scanNode(rows)
 		if err != nil {

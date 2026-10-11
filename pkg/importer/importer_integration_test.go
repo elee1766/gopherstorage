@@ -17,6 +17,7 @@ import (
 	"github.com/elee1766/gopherstorage/pkg/blob/filesystem"
 	"github.com/elee1766/gopherstorage/pkg/importer"
 	"github.com/elee1766/gopherstorage/pkg/meta"
+	"github.com/elee1766/gopherstorage/pkg/meta/sqlite"
 	"github.com/elee1766/gopherstorage/pkg/storage"
 	"golang.org/x/sys/unix"
 )
@@ -37,7 +38,7 @@ func TestRunStreamsAndResumesWithRealStorage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := meta.Open(ctx, filepath.Join(t.TempDir(), "meta.db"))
+	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "meta.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +126,7 @@ func TestRunDrainsWorkersWhenWalkingFindsInvalidName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := meta.Open(ctx, filepath.Join(t.TempDir(), "meta.db"))
+	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "meta.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +182,7 @@ func TestOpenSourcePinsDirectoryAcrossRenameAndRunSourceRepeat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := meta.Open(ctx, filepath.Join(t.TempDir(), "meta.db"))
+	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "meta.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +233,7 @@ func TestRunRejectsSameSizeEditWithRestoredMtime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := meta.Open(ctx, filepath.Join(t.TempDir(), "meta.db"))
+	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "meta.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +322,7 @@ func TestQuotaAndDocumentLimitRejectBeforeCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := meta.Open(ctx, filepath.Join(t.TempDir(), "meta.db"))
+	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "meta.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +365,7 @@ func TestCancellationPreservesCompletedWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := meta.Open(context.Background(), filepath.Join(t.TempDir(), "meta.db"))
+	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "meta.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +410,7 @@ func TestPublicFileRequiresExplicitOptIn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := meta.Open(ctx, filepath.Join(t.TempDir(), "meta.db"))
+	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "meta.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +449,7 @@ func TestDryRunDoesNotWriteAndRejectsPublicFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := meta.Open(ctx, filepath.Join(t.TempDir(), "meta.db"))
+	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "meta.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

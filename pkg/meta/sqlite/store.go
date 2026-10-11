@@ -1,6 +1,5 @@
-// Package meta is the metadata store: users, the document tree, OAuth grants
-// and tokens. It uses database/sql with SQLite and goose migrations.
-package meta
+// Package sqlite implements the metadata store using database/sql and goose migrations.
+package sqlite
 
 import (
 	"context"
@@ -14,18 +13,13 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/elee1766/gopherstorage/pkg/meta"
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
 
 //go:embed migrations/*.sql
 var migrations embed.FS
-
-// ErrNotFound is returned when a row does not exist.
-var ErrNotFound = errors.New("not found")
-
-// ErrReadOnly rejects writes through a store opened with OpenReadOnly.
-var ErrReadOnly = errors.New("metadata store is read-only")
 
 // Store is the metadata store.
 type Store struct {
@@ -35,6 +29,8 @@ type Store struct {
 	// failing with SQLITE_BUSY.
 	wdb *sql.DB
 }
+
+var _ meta.Store = (*Store)(nil)
 
 // Open opens (creating if needed) the SQLite database at path and applies migrations.
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -111,7 +107,7 @@ func (s *Store) Close() error {
 // write runs fn in a write transaction.
 func (s *Store) write(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	if s.wdb == nil {
-		return ErrReadOnly
+		return meta.ErrReadOnly
 	}
 	tx, err := s.wdb.BeginTx(ctx, nil)
 	if err != nil {
@@ -125,120 +121,3 @@ func (s *Store) write(ctx context.Context, fn func(tx *sql.Tx) error) error {
 }
 
 func now() int64 { return time.Now().Unix() }
-
-// User is an account, created on first login.
-type User struct {
-	ID         int64
-	Sub        string
-	Username   string
-	Email      string
-	QuotaBytes int64
-	UsedBytes  int64
-	CreatedAt  time.Time
-	LastLogin  time.Time
-	// IsAdmin reflects the OIDC groups at the last login.
-	IsAdmin  bool
-	Disabled bool
-}
-
-const userCols = `id, sub, username, email, quota_bytes, used_bytes, created_at, last_login, is_admin, disabled`
-
-func scanUser(row interface{ Scan(...any) error }) (*User, error) {
-	var u User
-	var created, login int64
-	var disabled bool
-	if err := row.Scan(&u.ID, &u.Sub, &u.Username, &u.Email, &u.QuotaBytes, &u.UsedBytes, &created, &login, &u.IsAdmin, &disabled); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-	u.CreatedAt, u.LastLogin, u.Disabled = time.Unix(created, 0), time.Unix(login, 0), disabled
-	return &u, nil
-}
-
-// ErrUsernameTaken is returned when another account already uses the username.
-var ErrUsernameTaken = errors.New("username is used by another account")
-
-// Login is what an OIDC login tells us about a user.
-type Login struct {
-	Sub, Username, Email string
-	IsAdmin              bool
-}
-
-// UpsertUser records a login. Accounts are keyed by OIDC subject; the
-// username is updated if it changed and is still free.
-func (s *Store) UpsertUser(ctx context.Context, l Login) (*User, error) {
-	var u *User
-	err := s.write(ctx, func(tx *sql.Tx) error {
-		var owner string
-		err := tx.QueryRowContext(ctx, `SELECT sub FROM users WHERE username = ?`, l.Username).Scan(&owner)
-		if err == nil && owner != l.Sub {
-			return ErrUsernameTaken
-		}
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		t := now()
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO users (sub, username, email, created_at, last_login, is_admin) VALUES (?, ?, ?, ?, ?, ?)
-			ON CONFLICT (sub) DO UPDATE SET username = excluded.username, email = excluded.email,
-				last_login = excluded.last_login, is_admin = excluded.is_admin
-			WHERE users.disabled = 0`,
-			l.Sub, l.Username, l.Email, t, t, l.IsAdmin)
-		if err != nil {
-			return err
-		}
-		var disabled bool
-		if err := tx.QueryRowContext(ctx, `SELECT disabled FROM users WHERE sub=?`, l.Sub).Scan(&disabled); err != nil {
-			return err
-		}
-		if disabled {
-			return ErrAccountDisabled
-		}
-		u, err = scanUser(tx.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE sub = ?`, l.Sub))
-		return err
-	})
-	return u, err
-}
-
-// UserByName returns the user with the given storage username.
-func (s *Store) UserByName(ctx context.Context, username string) (*User, error) {
-	return scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE username = ?`, username))
-}
-
-// UserByID returns a user by id.
-func (s *Store) UserByID(ctx context.Context, id int64) (*User, error) {
-	return scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE id = ?`, id))
-}
-
-// UserBySub returns a user by OIDC subject.
-func (s *Store) UserBySub(ctx context.Context, sub string) (*User, error) {
-	return scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE sub = ?`, sub))
-}
-
-// ListUsers returns all users ordered by username.
-func (s *Store) ListUsers(ctx context.Context) ([]*User, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+userCols+` FROM users ORDER BY username`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []*User
-	for rows.Next() {
-		u, err := scanUser(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, u)
-	}
-	return out, rows.Err()
-}
-
-// SetQuota sets a user's quota in bytes (0 = server default).
-func (s *Store) SetQuota(ctx context.Context, userID, quota int64) error {
-	return s.write(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `UPDATE users SET quota_bytes = ? WHERE id = ?`, quota, userID)
-		return err
-	})
-}

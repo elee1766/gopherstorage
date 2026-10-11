@@ -23,7 +23,7 @@ import (
 
 // Service gives out per-user backends.
 type Service struct {
-	Meta  *meta.Store
+	Meta  meta.Store
 	Blobs blob.Store
 	// DefaultQuota applies to users without their own quota. 0 = unlimited.
 	DefaultQuota int64

@@ -58,11 +58,11 @@ type Authenticator struct {
 	session    *sealer
 	flow       *sealer
 	endSess    string
-	store      *meta.Store
+	store      meta.Store
 	httpClient *http.Client
 }
 
-func New(ctx context.Context, cfg *config.Config, store *meta.Store) (*Authenticator, error) {
+func New(ctx context.Context, cfg *config.Config, store meta.Store) (*Authenticator, error) {
 	if err := validateOIDCEndpoint(cfg.OIDC.Issuer, cfg.AllowInsecureHTTP); err != nil {
 		return nil, fmt.Errorf("oidc issuer: %w", err)
 	}
@@ -163,11 +163,11 @@ func isLoopbackHost(host string) bool {
 
 // NewSessionsOnly returns an Authenticator that can read and issue session
 // cookies but cannot log anyone in. It is for tests.
-func NewSessionsOnly(cfg *config.Config, store *meta.Store) (*Authenticator, error) {
+func NewSessionsOnly(cfg *config.Config, store meta.Store) (*Authenticator, error) {
 	return newSessions(cfg, store)
 }
 
-func newSessions(cfg *config.Config, store *meta.Store) (*Authenticator, error) {
+func newSessions(cfg *config.Config, store meta.Store) (*Authenticator, error) {
 	sess, err := newSealer(cfg.Session.Secret, "session")
 	if err != nil {
 		return nil, err

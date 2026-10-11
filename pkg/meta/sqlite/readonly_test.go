@@ -1,4 +1,4 @@
-package meta
+package sqlite
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/elee1766/gopherstorage/pkg/meta"
 )
 
 func TestReadOnlyMetadataCannotCreateOrModifyAccounts(t *testing.T) {
@@ -15,7 +17,7 @@ func TestReadOnlyMetadataCannotCreateOrModifyAccounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u, err := store.UpsertUser(ctx, Login{Sub: "readonly", Username: "alice"})
+	u, err := store.UpsertUser(ctx, meta.Login{Sub: "readonly", Username: "alice"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,10 +32,10 @@ func TestReadOnlyMetadataCannotCreateOrModifyAccounts(t *testing.T) {
 	if found, err := ro.UserByName(ctx, "alice"); err != nil || found.ID != u.ID {
 		t.Fatalf("read-only lookup: %v %v", found, err)
 	}
-	if err := ro.SetQuota(ctx, u.ID, 42); !errors.Is(err, ErrReadOnly) {
+	if err := ro.SetQuota(ctx, u.ID, 42); !errors.Is(err, meta.ErrReadOnly) {
 		t.Fatalf("read-only quota write: %v", err)
 	}
-	if _, err := ro.UpsertUser(ctx, Login{Sub: "new", Username: "bob"}); !errors.Is(err, ErrReadOnly) {
+	if _, err := ro.UpsertUser(ctx, meta.Login{Sub: "new", Username: "bob"}); !errors.Is(err, meta.ErrReadOnly) {
 		t.Fatalf("read-only account creation: %v", err)
 	}
 	if _, err := ro.db.ExecContext(ctx, `UPDATE users SET quota_bytes=42`); err == nil {

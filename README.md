@@ -184,7 +184,5 @@ GS_TEST_S3_ENDPOINT=http://127.0.0.1:8333 GS_TEST_S3_BUCKET=test \
 GS_TEST_S3_ACCESS_KEY=... GS_TEST_S3_SECRET_KEY=... go test ./pkg/...
 ```
 
-see [deployment security](docs/deployment-security.md), the
-[security audit](docs/security-audit-2026-10-10.md) and
-[performance notes](docs/performance-notes.md) for operational constraints and
+see [performance notes](docs/performance-notes.md) for operational constraints and
 verification details.

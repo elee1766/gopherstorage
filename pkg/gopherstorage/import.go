@@ -16,6 +16,7 @@ import (
 	"github.com/elee1766/gopherstorage/pkg/config"
 	"github.com/elee1766/gopherstorage/pkg/importer"
 	"github.com/elee1766/gopherstorage/pkg/meta"
+	"github.com/elee1766/gopherstorage/pkg/meta/sqlite"
 )
 
 type importRequest struct {
@@ -72,7 +73,8 @@ func runImport(ctx context.Context, cfg *config.Config, req importRequest, outpu
 		return fmt.Errorf("import requires the server to be stopped: %w", err)
 	}
 	defer release()
-	store, err := meta.OpenReadOnly(ctx, dbPath)
+	var store meta.Store
+	store, err = sqlite.OpenReadOnly(ctx, dbPath)
 	if err != nil {
 		return err
 	}
@@ -91,7 +93,7 @@ func runImport(ctx context.Context, cfg *config.Config, req importRequest, outpu
 		if err := store.Close(); err != nil {
 			return err
 		}
-		store, err = meta.Open(ctx, dbPath)
+		store, err = sqlite.Open(ctx, dbPath)
 		if err != nil {
 			return err
 		}

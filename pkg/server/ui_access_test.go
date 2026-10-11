@@ -14,13 +14,14 @@ import (
 	"github.com/elee1766/gopherstorage/pkg/blob/filesystem"
 	"github.com/elee1766/gopherstorage/pkg/config"
 	"github.com/elee1766/gopherstorage/pkg/meta"
+	"github.com/elee1766/gopherstorage/pkg/meta/sqlite"
 	"github.com/elee1766/gopherstorage/pkg/oauth"
 	"github.com/elee1766/gopherstorage/pkg/storage"
 )
 
 func TestAdminUIAccountAccessControl(t *testing.T) {
 	ctx := context.Background()
-	store, err := meta.Open(ctx, t.TempDir()+"/meta.db")
+	store, err := sqlite.Open(ctx, t.TempDir()+"/meta.db")
 	if err != nil {
 		t.Fatal(err)
 	}

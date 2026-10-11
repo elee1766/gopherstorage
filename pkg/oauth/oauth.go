@@ -30,7 +30,7 @@ const codeTTL = 5 * time.Minute
 
 type Server struct {
 	Auth          *auth.Authenticator
-	Store         *meta.Store
+	Store         meta.Store
 	TokenTTL      time.Duration
 	AllowImplicit bool
 	// CSRFKey signs consent forms.

@@ -16,6 +16,7 @@ import (
 	"github.com/elee1766/gopherstorage/pkg/config"
 	"github.com/elee1766/gopherstorage/pkg/importer"
 	"github.com/elee1766/gopherstorage/pkg/meta"
+	"github.com/elee1766/gopherstorage/pkg/meta/sqlite"
 )
 
 func TestOfflineImportPreflightDryRunAndRecovery(t *testing.T) {
@@ -31,7 +32,7 @@ func TestOfflineImportPreflightDryRunAndRecovery(t *testing.T) {
 	cfg := &config.Config{DataDir: data, Storage: config.Storage{Backend: "filesystem", Path: blobs,
 		DefaultQuotaBytes: 1024, MaxDocumentBytes: 1024, MaxConcurrentUploads: 1}}
 	dbPath := filepath.Join(data, "meta.db")
-	store, err := meta.Open(ctx, dbPath)
+	store, err := sqlite.Open(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +137,7 @@ func TestOfflineImportPreflightDryRunAndRecovery(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &summary); err != nil || summary.Imported != 1 {
 		t.Fatalf("actual import summary: %s %v", output.String(), err)
 	}
-	ro, err := meta.OpenReadOnly(ctx, dbPath)
+	ro, err := sqlite.OpenReadOnly(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

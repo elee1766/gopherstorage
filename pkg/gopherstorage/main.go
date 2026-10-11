@@ -20,6 +20,7 @@ import (
 	"github.com/elee1766/gopherstorage/pkg/config"
 	"github.com/elee1766/gopherstorage/pkg/importer"
 	"github.com/elee1766/gopherstorage/pkg/meta"
+	"github.com/elee1766/gopherstorage/pkg/meta/sqlite"
 	"github.com/elee1766/gopherstorage/pkg/oauth"
 	"github.com/elee1766/gopherstorage/pkg/server"
 	"github.com/elee1766/gopherstorage/pkg/storage"
@@ -99,7 +100,7 @@ func Run(ctx context.Context, args []string) error {
 	}
 	defer unlock()
 
-	store, err := meta.Open(initCtx, filepath.Join(cfg.DataDir, "meta.db"))
+	store, err := sqlite.Open(initCtx, filepath.Join(cfg.DataDir, "meta.db"))
 	if err != nil {
 		return fmt.Errorf("open metadata: %w", err)
 	}
@@ -157,7 +158,7 @@ func Run(ctx context.Context, args []string) error {
 	return nil
 }
 
-func storageService(cfg *config.Config, store *meta.Store, blobs blob.Store) *storage.Service {
+func storageService(cfg *config.Config, store meta.Store, blobs blob.Store) *storage.Service {
 	return &storage.Service{
 		Meta: store, Blobs: blobs, DefaultQuota: cfg.Storage.DefaultQuotaBytes,
 		MaxDocumentBytes:     cfg.Storage.MaxDocumentBytes,
@@ -183,7 +184,7 @@ func openBlobs(ctx context.Context, cfg *config.Config, opts ...blob.Option) (bl
 }
 
 // maintenance deletes orphaned blobs and expired tokens once an hour.
-func maintenance(ctx context.Context, svc *storage.Service, store *meta.Store) {
+func maintenance(ctx context.Context, svc *storage.Service, store meta.Store) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	for {

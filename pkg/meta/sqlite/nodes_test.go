@@ -1,10 +1,12 @@
-package meta
+package sqlite
 
 import (
 	"context"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/elee1766/gopherstorage/pkg/meta"
 )
 
 func TestOfflineCollectionClaimsRecentAndFutureUploads(t *testing.T) {
@@ -15,7 +17,7 @@ func TestOfflineCollectionClaimsRecentAndFutureUploads(t *testing.T) {
 	}
 	defer store.Close()
 	for i := 0; i < 2; i++ {
-		key := NewBlobKey()
+		key := meta.NewBlobKey()
 		if err := store.AddPendingBlob(ctx, key); err != nil {
 			t.Fatal(err)
 		}

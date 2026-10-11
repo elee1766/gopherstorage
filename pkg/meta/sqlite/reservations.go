@@ -1,4 +1,4 @@
-package meta
+package sqlite
 
 import (
 	"context"
@@ -6,18 +6,15 @@ import (
 	"errors"
 
 	"anime.bike/remotestorage/pkg/rs"
+	"github.com/elee1766/gopherstorage/pkg/meta"
 )
-
-// ErrUploadCapacity is the protocol capacity error used when staging or
-// per-user in-flight limits reject an upload.
-var ErrUploadCapacity = rs.ErrQuotaExceeded
 
 // ReserveUpload atomically records an upload blob and its capacity reservation.
 // A nonzero maxStagingBytes limits all in-flight reservations across the store.
 // maxInFlight limits simultaneous reservations for one user.
 func (s *Store) ReserveUpload(ctx context.Context, userID int64, path, blobKey string, reserveBytes, quota int64, maxInFlight int, maxStagingBytes int64, maxFolderChildren int, clamp bool) (int64, error) {
 	if reserveBytes < 0 || maxInFlight <= 0 || maxStagingBytes <= 0 {
-		return 0, ErrUploadCapacity
+		return 0, meta.ErrUploadCapacity
 	}
 	reserved := reserveBytes
 	err := s.write(ctx, func(tx *sql.Tx) error {
@@ -26,10 +23,10 @@ func (s *Store) ReserveUpload(ctx context.Context, userID int64, path, blobKey s
 			return err
 		}
 		if disabled {
-			return ErrAccountDisabled
+			return meta.ErrAccountDisabled
 		}
 		old, err := getNode(ctx, tx, userID, path)
-		if err != nil && !errors.Is(err, ErrNotFound) {
+		if err != nil && !errors.Is(err, meta.ErrNotFound) {
 			return err
 		}
 		var credit int64
@@ -52,7 +49,7 @@ func (s *Store) ReserveUpload(ctx context.Context, userID int64, path, blobKey s
 			return err
 		}
 		if inFlight >= maxInFlight {
-			return ErrUploadCapacity
+			return meta.ErrUploadCapacity
 		}
 		var unknownPending bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
@@ -61,7 +58,7 @@ func (s *Store) ReserveUpload(ctx context.Context, userID int64, path, blobKey s
 			return err
 		}
 		if unknownPending {
-			return ErrUploadCapacity
+			return meta.ErrUploadCapacity
 		}
 		var staged int64
 		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(reserved_bytes + orphan_bytes), 0) +
@@ -74,12 +71,12 @@ func (s *Store) ReserveUpload(ctx context.Context, userID int64, path, blobKey s
 			stagingAvailable = maxStagingBytes - staged
 		}
 		if credit > stagingAvailable {
-			return ErrUploadCapacity
+			return meta.ErrUploadCapacity
 		}
 		stagingAvailable -= credit
 		if reserved > stagingAvailable {
 			if !clamp {
-				return ErrUploadCapacity
+				return meta.ErrUploadCapacity
 			}
 			reserved = stagingAvailable
 		}

@@ -1,16 +1,13 @@
-package meta
+package sqlite
 
 import (
 	"context"
 	"database/sql"
 	"errors"
 	"time"
+
+	"github.com/elee1766/gopherstorage/pkg/meta"
 )
-
-var ErrSessionLimit = errors.New("too many active sessions")
-var ErrAccountDisabled = errors.New("account is disabled")
-
-const MaxSessionsPerUser = 50
 
 // CreateSession records a server-side session using only a hash of its random identifier.
 func (s *Store) CreateSession(ctx context.Context, id []byte, userID int64, issuer, subject, oidcSID string, ttl time.Duration) error {
@@ -22,8 +19,8 @@ func (s *Store) CreateSession(ctx context.Context, id []byte, userID int64, issu
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions WHERE user_id=?`, userID).Scan(&count); err != nil {
 			return err
 		}
-		if count >= MaxSessionsPerUser {
-			return ErrSessionLimit
+		if count >= meta.MaxSessionsPerUser {
+			return meta.ErrSessionLimit
 		}
 		res, err := tx.ExecContext(ctx, `INSERT INTO sessions (id_hash, user_id, issuer, oidc_sub, oidc_sid, created_at, expires_at)
 			SELECT ?, id, ?, ?, ?, ?, ? FROM users WHERE id = ? AND disabled = 0`, id, issuer, subject, oidcSID, now(), time.Now().Add(ttl).Unix(), userID)
@@ -35,7 +32,7 @@ func (s *Store) CreateSession(ctx context.Context, id []byte, userID int64, issu
 			return err
 		}
 		if n == 0 {
-			return ErrNotFound
+			return meta.ErrNotFound
 		}
 		return nil
 	})
@@ -70,7 +67,7 @@ func (s *Store) SetUserDisabled(ctx context.Context, userID int64, disabled bool
 			return err
 		}
 		if n == 0 {
-			return ErrNotFound
+			return meta.ErrNotFound
 		}
 		if !disabled {
 			return nil
@@ -87,7 +84,7 @@ func (s *Store) RevokeUserCredentials(ctx context.Context, userID int64) error {
 			return err
 		}
 		if !exists {
-			return ErrNotFound
+			return meta.ErrNotFound
 		}
 		return revokeUserCredentialsTx(ctx, tx, userID)
 	})

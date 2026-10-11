@@ -13,6 +13,7 @@ import (
 
 	"github.com/elee1766/gopherstorage/pkg/config"
 	"github.com/elee1766/gopherstorage/pkg/meta"
+	"github.com/elee1766/gopherstorage/pkg/meta/sqlite"
 	"golang.org/x/oauth2"
 )
 
@@ -85,7 +86,7 @@ func TestCallbackBadStateKeepsFlowCookie(t *testing.T) {
 
 func TestLegacySealedSessionWithoutDatabaseIDFailsClosed(t *testing.T) {
 	ctx := context.Background()
-	store, err := meta.Open(ctx, t.TempDir()+"/meta.db")
+	store, err := sqlite.Open(ctx, t.TempDir()+"/meta.db")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +114,7 @@ func TestLegacySealedSessionWithoutDatabaseIDFailsClosed(t *testing.T) {
 func TestPersistedSessionExpiryInvalidatesCookie(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/meta.db"
-	store, err := meta.Open(ctx, dbPath)
+	store, err := sqlite.Open(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

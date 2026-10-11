@@ -13,6 +13,7 @@ import (
 	"github.com/elee1766/gopherstorage/pkg/blob/filesystem"
 	"github.com/elee1766/gopherstorage/pkg/config"
 	"github.com/elee1766/gopherstorage/pkg/meta"
+	"github.com/elee1766/gopherstorage/pkg/meta/sqlite"
 	"github.com/elee1766/gopherstorage/pkg/oauth"
 	"github.com/elee1766/gopherstorage/pkg/storage"
 )
@@ -195,9 +196,9 @@ func TestDisabledUserIsHiddenFromPublicStorageAndWebFinger(t *testing.T) {
 	}
 }
 
-func newLimitsTestHandler(t *testing.T, cfg *config.Config) (http.Handler, *meta.Store, *storage.Service) {
+func newLimitsTestHandler(t *testing.T, cfg *config.Config) (http.Handler, meta.Store, *storage.Service) {
 	t.Helper()
-	store, err := meta.Open(context.Background(), t.TempDir()+"/meta.db")
+	store, err := sqlite.Open(context.Background(), t.TempDir()+"/meta.db")
 	if err != nil {
 		t.Fatal(err)
 	}

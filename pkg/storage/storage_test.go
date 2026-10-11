@@ -20,12 +20,13 @@ import (
 	"github.com/elee1766/gopherstorage/pkg/blob/filesystem"
 	"github.com/elee1766/gopherstorage/pkg/blob/s3"
 	"github.com/elee1766/gopherstorage/pkg/meta"
+	"github.com/elee1766/gopherstorage/pkg/meta/sqlite"
 	"github.com/elee1766/gopherstorage/pkg/storage"
 )
 
 func newService(t *testing.T, blobs blob.Store) *storage.Service {
 	ctx := context.Background()
-	m, err := meta.Open(ctx, t.TempDir()+"/meta.db")
+	m, err := sqlite.Open(ctx, t.TempDir()+"/meta.db")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +201,7 @@ func TestUploadReservationsAreAtomicAcrossStoresAndReleaseOnCancel(t *testing.T)
 		t.Fatal(err)
 	}
 	defer blobs.Close()
-	meta1, err := meta.Open(ctx, dbPath)
+	meta1, err := sqlite.Open(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +219,7 @@ func TestUploadReservationsAreAtomicAcrossStoresAndReleaseOnCancel(t *testing.T)
 	if _, err := backend1.Put(ctx, "/replace", strings.NewReader("four"), 4, "text/plain", rsserver.Condition{}); err != nil {
 		t.Fatal(err)
 	}
-	meta2, err := meta.Open(ctx, dbPath)
+	meta2, err := sqlite.Open(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +286,7 @@ func TestUploadReservationsAreAtomicAcrossStoresAndReleaseOnCancel(t *testing.T)
 func TestPerUserConcurrentUploadSlotLimit(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	m, err := meta.Open(ctx, filepath.Join(dir, "meta.db"))
+	m, err := sqlite.Open(ctx, filepath.Join(dir, "meta.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +373,7 @@ func TestCrashReservationReleasedByPendingBlobGC(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer blobs.Close()
-	m, err := meta.Open(ctx, dbPath)
+	m, err := sqlite.Open(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +394,7 @@ func TestCrashReservationReleasedByPendingBlobGC(t *testing.T) {
 
 	// Reopening the real database represents process recovery. GC claims and
 	// deletes the abandoned blob, then ForgetBlob cascades its reservation.
-	m, err = meta.Open(ctx, dbPath)
+	m, err = sqlite.Open(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

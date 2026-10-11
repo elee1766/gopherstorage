@@ -1,4 +1,4 @@
-package meta
+package sqlite
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/elee1766/gopherstorage/pkg/meta"
 )
 
 func TestPerUserSessionAndOAuthCredentialCaps(t *testing.T) {
@@ -15,22 +17,22 @@ func TestPerUserSessionAndOAuthCredentialCaps(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	u, err := store.UpsertUser(ctx, Login{Sub: "cap-user", Username: "capuser"})
+	u, err := store.UpsertUser(ctx, meta.Login{Sub: "cap-user", Username: "capuser"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	for i := 0; i < MaxSessionsPerUser; i++ {
+	for i := 0; i < meta.MaxSessionsPerUser; i++ {
 		if err := store.CreateSession(ctx, []byte(fmt.Sprintf("session-%d", i)), u.ID, "issuer", u.Sub, "", time.Hour); err != nil {
 			t.Fatalf("create session %d: %v", i, err)
 		}
 	}
-	if err := store.CreateSession(ctx, []byte("session-over-cap"), u.ID, "issuer", u.Sub, "", time.Hour); !errors.Is(err, ErrSessionLimit) {
-		t.Fatalf("51st session error = %v, want ErrSessionLimit", err)
+	if err := store.CreateSession(ctx, []byte("session-over-cap"), u.ID, "issuer", u.Sub, "", time.Hour); !errors.Is(err, meta.ErrSessionLimit) {
+		t.Fatalf("51st session error = %v, want meta.ErrSessionLimit", err)
 	}
 
 	var firstGrant int64
-	for i := 0; i < MaxOAuthGrantsPerUser; i++ {
+	for i := 0; i < meta.MaxOAuthGrantsPerUser; i++ {
 		id, err := store.UpsertGrant(ctx, u.ID, fmt.Sprintf("https://app-%d.example", i), "app", "notes:r")
 		if err != nil {
 			t.Fatalf("create grant %d: %v", i, err)
@@ -39,27 +41,27 @@ func TestPerUserSessionAndOAuthCredentialCaps(t *testing.T) {
 			firstGrant = id
 		}
 	}
-	if _, err := store.UpsertGrant(ctx, u.ID, "https://app-over-cap.example", "app", "notes:r"); !errors.Is(err, ErrCredentialLimit) {
-		t.Fatalf("101st grant error = %v, want ErrCredentialLimit", err)
+	if _, err := store.UpsertGrant(ctx, u.ID, "https://app-over-cap.example", "app", "notes:r"); !errors.Is(err, meta.ErrCredentialLimit) {
+		t.Fatalf("101st grant error = %v, want meta.ErrCredentialLimit", err)
 	}
 
-	for i := 0; i < MaxPendingAuthCodesPerUser; i++ {
+	for i := 0; i < meta.MaxPendingAuthCodesPerUser; i++ {
 		code := fmt.Sprintf("code-%d", i)
-		if err := store.SaveAuthCode(ctx, code, AuthCode{GrantID: firstGrant, RedirectURI: "https://app.example/cb", Scope: "notes:r", CodeChallenge: "challenge"}, time.Hour); err != nil {
+		if err := store.SaveAuthCode(ctx, code, meta.AuthCode{GrantID: firstGrant, RedirectURI: "https://app.example/cb", Scope: "notes:r", CodeChallenge: "challenge"}, time.Hour); err != nil {
 			t.Fatalf("save auth code %d: %v", i, err)
 		}
 	}
-	if err := store.SaveAuthCode(ctx, "code-over-cap", AuthCode{GrantID: firstGrant}, time.Hour); !errors.Is(err, ErrCredentialLimit) {
-		t.Fatalf("33rd pending code error = %v, want ErrCredentialLimit", err)
+	if err := store.SaveAuthCode(ctx, "code-over-cap", meta.AuthCode{GrantID: firstGrant}, time.Hour); !errors.Is(err, meta.ErrCredentialLimit) {
+		t.Fatalf("33rd pending code error = %v, want meta.ErrCredentialLimit", err)
 	}
 
-	for i := 0; i < MaxActiveCredentialsPerUser-MaxPendingAuthCodesPerUser; i++ {
+	for i := 0; i < meta.MaxActiveCredentialsPerUser-meta.MaxPendingAuthCodesPerUser; i++ {
 		if err := store.IssueToken(ctx, firstGrant, fmt.Sprintf("token-%d", i), "notes:r", time.Hour); err != nil {
 			t.Fatalf("issue token %d: %v", i, err)
 		}
 	}
-	if err := store.IssueToken(ctx, firstGrant, "token-over-cap", "notes:r", time.Hour); !errors.Is(err, ErrCredentialLimit) {
-		t.Fatalf("credential beyond combined cap error = %v, want ErrCredentialLimit", err)
+	if err := store.IssueToken(ctx, firstGrant, "token-over-cap", "notes:r", time.Hour); !errors.Is(err, meta.ErrCredentialLimit) {
+		t.Fatalf("credential beyond combined cap error = %v, want meta.ErrCredentialLimit", err)
 	}
 }
 
@@ -70,11 +72,11 @@ func TestOIDCLogoutSessionMappingAndReplayPrevention(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	first, err := store.UpsertUser(ctx, Login{Sub: "same-sub", Username: "first"})
+	first, err := store.UpsertUser(ctx, meta.Login{Sub: "same-sub", Username: "first"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := store.UpsertUser(ctx, Login{Sub: "other-sub", Username: "second"})
+	second, err := store.UpsertUser(ctx, meta.Login{Sub: "other-sub", Username: "second"})
 	if err != nil {
 		t.Fatal(err)
 	}

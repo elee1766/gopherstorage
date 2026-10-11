@@ -28,14 +28,14 @@ const StoragePrefix = "/storage/"
 
 type Server struct {
 	cfg     *config.Config
-	store   *meta.Store
+	store   meta.Store
 	storage *storage.Service
 	auth    *auth.Authenticator
 	oauth   *oauth.Server
 	rs      http.Handler
 }
 
-func New(cfg *config.Config, store *meta.Store, svc *storage.Service, a *auth.Authenticator, o *oauth.Server) *Server {
+func New(cfg *config.Config, store meta.Store, svc *storage.Service, a *auth.Authenticator, o *oauth.Server) *Server {
 	s := &Server{cfg: cfg, store: store, storage: svc, auth: a, oauth: o}
 	s.rs = rsserver.NewBuilder().
 		WithResourceResolver(resolver{}).
